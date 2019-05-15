@@ -5,7 +5,9 @@ from gensim.models import KeyedVectors
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.nn.init import xavier_uniform
+# feili
+# from torch.nn.init import xavier_uniform
+from torch.nn.init import xavier_uniform_ as xavier_uniform
 from torch.autograd import Variable
 
 import numpy as np
@@ -179,7 +181,9 @@ class ConvAttnPool(BaseModel):
         x = x.transpose(1, 2)
 
         #apply convolution and nonlinearity (tanh)
-        x = F.tanh(self.conv(x).transpose(1,2))
+        # feili
+        # x = F.tanh(self.conv(x).transpose(1,2))
+        x = torch.tanh(self.conv(x).transpose(1, 2))
         #apply attention
         alpha = F.softmax(self.U.weight.matmul(x.transpose(1,2)), dim=2)
         #document representations are weighted sums using the attention. Can compute all at once as a matmul
@@ -223,10 +227,14 @@ class VanillaConv(BaseModel):
         c = self.conv(x)
         if get_attention:
             #get argmax vector too
-            x, argmax = F.max_pool1d(F.tanh(c), kernel_size=c.size()[2], return_indices=True)
+            # feili
+            # x, argmax = F.max_pool1d(F.tanh(c), kernel_size=c.size()[2], return_indices=True)
+            x, argmax = F.max_pool1d(torch.tanh(c), kernel_size=c.size()[2], return_indices=True)
             attn = self.construct_attention(argmax, c.size()[2])
         else:
-            x = F.max_pool1d(F.tanh(c), kernel_size=c.size()[2])
+            # feili
+            # x = F.max_pool1d(F.tanh(c), kernel_size=c.size()[2])
+            x = F.max_pool1d(torch.tanh(c), kernel_size=c.size()[2])
             attn = None
         x = x.squeeze(dim=2)
 
