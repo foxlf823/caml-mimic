@@ -70,7 +70,8 @@ def train_epochs(args, model, optimizer, params, dicts):
         #only test on train/test set on very last epoch
         if epoch == 0 and not args.test_model:
             model_dir = os.path.join(MODEL_DIR, '_'.join([args.model, time.strftime('%b_%d_%H:%M:%S', time.localtime())]))
-            os.mkdir(model_dir)
+            #os.mkdir(model_dir)
+            os.makedirs(model_dir)
         elif args.test_model:
             model_dir = os.path.dirname(os.path.abspath(args.test_model))
         metrics_all = one_epoch(model, optimizer, args.Y, epoch, args.n_epochs, args.batch_size, args.data_path,
@@ -86,6 +87,8 @@ def train_epochs(args, model, optimizer, params, dicts):
 
         #save metrics, model, params
         persistence.save_everything(args, metrics_hist_all, model, model_dir, params, args.criterion, evaluate)
+
+        sys.stdout.flush()
 
         if test_only:
             #we're done
@@ -117,9 +120,11 @@ def one_epoch(model, optimizer, Y, epoch, n_epochs, batch_size, data_path, versi
         Wrapper to do a training epoch and test on dev
     """
     if not testing:
+        epoch_start = time.time()
         losses, unseen_code_inds = train(model, optimizer, Y, epoch, batch_size, data_path, gpu, version, dicts, quiet)
         loss = np.mean(losses)
-        print("epoch loss: " + str(loss))
+        epoch_finish = time.time()
+        print("epoch finish in %.2fs, loss: %.4f" % (epoch_finish-epoch_start, loss))
     else:
         loss = np.nan
         if model.lmbda > 0:
@@ -178,13 +183,14 @@ def train(model, optimizer, Y, epoch, batch_size, data_path, gpu, version, dicts
 
     model.train()
     gen = datasets.data_generator(data_path, dicts, batch_size, num_labels, version=version, desc_embed=desc_embed)
-    for batch_idx, tup in tqdm(enumerate(gen)):
+    #for batch_idx, tup in tqdm(enumerate(gen)):
+    for batch_idx, tup in enumerate(gen):
         data, target, _, code_set, descs = tup
         data, target = Variable(torch.LongTensor(data)), Variable(torch.FloatTensor(target))
         unseen_code_inds = unseen_code_inds.difference(code_set)
-        if gpu:
-            data = data.cuda()
-            target = target.cuda()
+        if gpu >= 0:
+            data = data.cuda(gpu)
+            target = target.cuda(gpu)
         optimizer.zero_grad()
 
         if desc_embed:
@@ -197,7 +203,8 @@ def train(model, optimizer, Y, epoch, batch_size, data_path, gpu, version, dicts
         loss.backward()
         optimizer.step()
 
-        losses.append(loss.data[0])
+        #losses.append(loss.data[0])
+        losses.append(loss.item())
 
         if not quiet and batch_idx % print_every == 0:
             #print the average loss of the last 10 batches
@@ -241,12 +248,13 @@ def test(model, Y, epoch, data_path, fold, gpu, version, code_inds, dicts, sampl
 
     model.eval()
     gen = datasets.data_generator(filename, dicts, 1, num_labels, version=version, desc_embed=desc_embed)
-    for batch_idx, tup in tqdm(enumerate(gen)):
+    #for batch_idx, tup in tqdm(enumerate(gen)):
+    for batch_idx, tup in enumerate(gen):
         data, target, hadm_ids, _, descs = tup
         data, target = Variable(torch.LongTensor(data), volatile=True), Variable(torch.FloatTensor(target))
-        if gpu:
-            data = data.cuda()
-            target = target.cuda()
+        if gpu >= 0:
+            data = data.cuda(gpu)
+            target = target.cuda(gpu)
         model.zero_grad()
 
         if desc_embed:
@@ -338,7 +346,7 @@ if __name__ == "__main__":
                         help="which metric to use for early stopping (default: f1_micro)")
     parser.add_argument("--patience", type=int, default=3, required=False,
                         help="how many epochs to wait for improved criterion metric before early stopping (default: 3)")
-    parser.add_argument("--gpu", dest="gpu", action="store_const", required=False, const=True,
+    parser.add_argument("--gpu", dest="gpu", type=int, default=-1, required=False,
                         help="optional flag to use GPU if available")
     parser.add_argument("--public-model", dest="public_model", action="store_const", required=False, const=True,
                         help="optional flag for testing pre-trained models from the public github")

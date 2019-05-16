@@ -22,7 +22,7 @@ from dataproc import extract_wvs
 
 class BaseModel(nn.Module):
 
-    def __init__(self, Y, embed_file, dicts, lmbda=0, dropout=0.5, gpu=True, embed_size=100):
+    def __init__(self, Y, embed_file, dicts, lmbda=0, dropout=0.5, gpu=-1, embed_size=100):
         super(BaseModel, self).__init__()
         torch.manual_seed(1337)
         self.gpu = gpu
@@ -60,8 +60,8 @@ class BaseModel(nn.Module):
         b_batch = []
         for inst in desc_data:
             if len(inst) > 0:
-                if gpu:
-                    lt = Variable(torch.cuda.LongTensor(inst))
+                if gpu >= 0:
+                    lt = torch.LongTensor(inst).cuda(gpu)
                 else:
                     lt = Variable(torch.LongTensor(inst))
                 d = self.desc_embedding(lt)
@@ -207,7 +207,7 @@ class ConvAttnPool(BaseModel):
 
 class VanillaConv(BaseModel):
 
-    def __init__(self, Y, embed_file, kernel_size, num_filter_maps, gpu=True, dicts=None, embed_size=100, dropout=0.5):
+    def __init__(self, Y, embed_file, kernel_size, num_filter_maps, gpu=-1, dicts=None, embed_size=100, dropout=0.5):
         super(VanillaConv, self).__init__(Y, embed_file, dicts, dropout=dropout, embed_size=embed_size) 
         #initialize conv layer as in 2.1
         self.conv = nn.Conv1d(self.embed_size, num_filter_maps, kernel_size=kernel_size)
@@ -313,15 +313,25 @@ class VanillaRNN(BaseModel):
         return yhat, loss, None
 
     def init_hidden(self):
-        if self.gpu:
-            h_0 = Variable(torch.cuda.FloatTensor(self.num_directions*self.num_layers, self.batch_size,
-                                                  floor(self.rnn_dim/self.num_directions)).zero_())
+        if self.gpu >= 0:
+            # h_0 = Variable(torch.cuda.FloatTensor(self.num_directions*self.num_layers, self.batch_size,
+            #                                       floor(self.rnn_dim/self.num_directions)).zero_())
+            # if self.cell_type == 'lstm':
+            #     c_0 = Variable(torch.cuda.FloatTensor(self.num_directions*self.num_layers, self.batch_size,
+            #                                           floor(self.rnn_dim/self.num_directions)).zero_())
+            #     return (h_0, c_0)
+            # else:
+            #     return h_0
+
+            h_0 = torch.FloatTensor(self.num_directions * self.num_layers, self.batch_size,
+                                                  floor(self.rnn_dim / self.num_directions)).zero_().cuda(self.gpu)
             if self.cell_type == 'lstm':
-                c_0 = Variable(torch.cuda.FloatTensor(self.num_directions*self.num_layers, self.batch_size,
-                                                      floor(self.rnn_dim/self.num_directions)).zero_())
+                c_0 = torch.FloatTensor(self.num_directions * self.num_layers, self.batch_size,
+                                                      floor(self.rnn_dim / self.num_directions)).zero_().cuda(self.gpu)
                 return (h_0, c_0)
             else:
                 return h_0
+
         else:
             h_0 = Variable(torch.zeros(self.num_directions*self.num_layers, self.batch_size, floor(self.rnn_dim/self.num_directions)))
             if self.cell_type == 'lstm':

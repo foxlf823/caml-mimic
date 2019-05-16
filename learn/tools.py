@@ -36,8 +36,8 @@ def pick_model(args, dicts):
     if args.test_model:
         sd = torch.load(args.test_model)
         model.load_state_dict(sd)
-    if args.gpu:
-        model.cuda()
+    if args.gpu >= 0:
+        model.cuda(args.gpu)
     return model
 
 def make_param_dict(args):
