@@ -24,6 +24,7 @@ import interpret
 import persistence
 import learn.models as models
 import learn.tools as tools
+from pytorch_pretrained_bert import BertTokenizer
 
 def main(args):
     start = time.time()
@@ -74,7 +75,7 @@ def train_epochs(args, model, optimizer, params, dicts):
             os.makedirs(model_dir)
         elif args.test_model:
             model_dir = os.path.dirname(os.path.abspath(args.test_model))
-        metrics_all = one_epoch(model, optimizer, args.Y, epoch, args.n_epochs, args.batch_size, args.data_path,
+        metrics_all = one_epoch(args, model, optimizer, args.Y, epoch, args.n_epochs, args.batch_size, args.data_path,
                                                   args.version, test_only, dicts, model_dir, 
                                                   args.samples, args.gpu, args.quiet)
         for name in metrics_all[0].keys():
@@ -114,14 +115,14 @@ def early_stop(metrics_hist, criterion, patience):
         #keep training if criterion results have all been nan so far
         return False
         
-def one_epoch(model, optimizer, Y, epoch, n_epochs, batch_size, data_path, version, testing, dicts, model_dir, 
+def one_epoch(args, model, optimizer, Y, epoch, n_epochs, batch_size, data_path, version, testing, dicts, model_dir,
               samples, gpu, quiet):
     """
         Wrapper to do a training epoch and test on dev
     """
     if not testing:
         epoch_start = time.time()
-        losses, unseen_code_inds = train(model, optimizer, Y, epoch, batch_size, data_path, gpu, version, dicts, quiet)
+        losses, unseen_code_inds = train(args, model, optimizer, Y, epoch, batch_size, data_path, gpu, version, dicts, quiet)
         loss = np.mean(losses)
         epoch_finish = time.time()
         print("epoch finish in %.2fs, loss: %.4f" % (epoch_finish-epoch_start, loss))
@@ -150,11 +151,11 @@ def one_epoch(model, optimizer, Y, epoch, n_epochs, batch_size, data_path, versi
         quiet = False
 
     #test on dev
-    metrics = test(model, Y, epoch, data_path, fold, gpu, version, unseen_code_inds, dicts, samples, model_dir,
+    metrics = test(args, model, Y, epoch, data_path, fold, gpu, version, unseen_code_inds, dicts, samples, model_dir,
                    testing)
     if testing or epoch == n_epochs - 1:
         print("\nevaluating on test")
-        metrics_te = test(model, Y, epoch, data_path, "test", gpu, version, unseen_code_inds, dicts, samples, 
+        metrics_te = test(args, model, Y, epoch, data_path, "test", gpu, version, unseen_code_inds, dicts, samples,
                           model_dir, True)
     else:
         metrics_te = defaultdict(float)
@@ -165,7 +166,7 @@ def one_epoch(model, optimizer, Y, epoch, n_epochs, batch_size, data_path, versi
     return metrics_all
 
 
-def train(model, optimizer, Y, epoch, batch_size, data_path, gpu, version, dicts, quiet):
+def train(args, model, optimizer, Y, epoch, batch_size, data_path, gpu, version, dicts, quiet):
     """
         Training loop.
         output: losses for each example for this iteration
@@ -182,15 +183,28 @@ def train(model, optimizer, Y, epoch, batch_size, data_path, gpu, version, dicts
     desc_embed = model.lmbda > 0
 
     model.train()
-    gen = datasets.data_generator(data_path, dicts, batch_size, num_labels, version=version, desc_embed=desc_embed)
+    if args.model.find("bert") != -1:
+        tokenizer = BertTokenizer.from_pretrained(args.bert_dir)
+    else:
+        tokenizer = None
+    gen = datasets.data_generator(args, tokenizer, data_path, dicts, batch_size, num_labels, version=version, desc_embed=desc_embed)
     #for batch_idx, tup in tqdm(enumerate(gen)):
     for batch_idx, tup in enumerate(gen):
         data, target, _, code_set, descs = tup
-        data, target = Variable(torch.LongTensor(data)), Variable(torch.FloatTensor(target))
+        if args.model.find("bert") != -1:
+            word, mask, segment, batch_size, chunk_num = data
+            data, target = (torch.LongTensor(word), torch.LongTensor(mask), torch.LongTensor(segment), batch_size, chunk_num), torch.FloatTensor(target)
+        else:
+            data, target = torch.LongTensor(data), torch.FloatTensor(target)
         unseen_code_inds = unseen_code_inds.difference(code_set)
         if gpu >= 0:
-            data = data.cuda(gpu)
-            target = target.cuda(gpu)
+            if args.model.find("bert") != -1:
+                word, mask, segment, batch_size, chunk_num = data
+                data = (word.cuda(gpu), mask.cuda(gpu), segment.cuda(gpu), batch_size, chunk_num)
+                target = target.cuda(gpu)
+            else:
+                data = data.cuda(gpu)
+                target = target.cuda(gpu)
         optimizer.zero_grad()
 
         if desc_embed:
@@ -224,7 +238,7 @@ def unseen_code_vecs(model, code_inds, dicts, gpu):
     model.final.weight.data[code_inds, :] = desc_embeddings.data
     model.final.bias.data[code_inds] = 0
 
-def test(model, Y, epoch, data_path, fold, gpu, version, code_inds, dicts, samples, model_dir, testing):
+def test(args, model, Y, epoch, data_path, fold, gpu, version, code_inds, dicts, samples, model_dir, testing):
     """
         Testing loop.
         Returns metrics
@@ -247,42 +261,60 @@ def test(model, Y, epoch, data_path, fold, gpu, version, code_inds, dicts, sampl
         unseen_code_vecs(model, code_inds, dicts, gpu)
 
     model.eval()
-    gen = datasets.data_generator(filename, dicts, 1, num_labels, version=version, desc_embed=desc_embed)
+    if args.model.find("bert") != -1:
+        tokenizer = BertTokenizer.from_pretrained(args.bert_dir)
+    else:
+        tokenizer = None
+    gen = datasets.data_generator(args, tokenizer, filename, dicts, 1, num_labels, version=version, desc_embed=desc_embed)
     #for batch_idx, tup in tqdm(enumerate(gen)):
     for batch_idx, tup in enumerate(gen):
-        data, target, hadm_ids, _, descs = tup
-        data, target = Variable(torch.LongTensor(data), volatile=True), Variable(torch.FloatTensor(target))
-        if gpu >= 0:
-            data = data.cuda(gpu)
-            target = target.cuda(gpu)
-        model.zero_grad()
+        with torch.no_grad():
 
-        if desc_embed:
-            desc_data = descs
-        else:
-            desc_data = None
+            data, target, hadm_ids, _, descs = tup
+            if args.model.find("bert") != -1:
+                word, mask, segment, batch_size, chunk_num = data
+                data, target = (torch.LongTensor(word), torch.LongTensor(mask), torch.LongTensor(segment), batch_size,
+                            chunk_num), torch.FloatTensor(target)
+            else:
+                data, target = torch.LongTensor(data), torch.FloatTensor(target)
 
-        #get an attention sample for 2% of batches
-        get_attn = samples and (np.random.rand() < 0.02 or (fold == 'test' and testing))
-        output, loss, alpha = model(data, target, desc_data=desc_data, get_attention=get_attn)
+            if gpu >= 0:
+                if args.model.find("bert") != -1:
+                    word, mask, segment, batch_size, chunk_num = data
+                    data = (word.cuda(gpu), mask.cuda(gpu), segment.cuda(gpu), batch_size, chunk_num)
+                    target = target.cuda(gpu)
+                else:
+                    data = data.cuda(gpu)
+                    target = target.cuda(gpu)
 
-        # feili
-        # output = F.sigmoid(output)
-        output = torch.sigmoid(output)
-        output = output.data.cpu().numpy()
-        # feili
-        # losses.append(loss.data[0])
-        losses.append(loss.item())
-        target_data = target.data.cpu().numpy()
-        if get_attn and samples:
-            interpret.save_samples(data, output, target_data, alpha, window_size, epoch, tp_file, fp_file, dicts=dicts)
+            model.zero_grad()
 
-        #save predictions, target, hadm ids
-        yhat_raw.append(output)
-        output = np.round(output)
-        y.append(target_data)
-        yhat.append(output)
-        hids.extend(hadm_ids)
+            if desc_embed:
+                desc_data = descs
+            else:
+                desc_data = None
+
+            #get an attention sample for 2% of batches
+            get_attn = samples and (np.random.rand() < 0.02 or (fold == 'test' and testing))
+            output, loss, alpha = model(data, target, desc_data=desc_data, get_attention=get_attn)
+
+            # feili
+            # output = F.sigmoid(output)
+            output = torch.sigmoid(output)
+            output = output.data.cpu().numpy()
+            # feili
+            # losses.append(loss.data[0])
+            losses.append(loss.item())
+            target_data = target.data.cpu().numpy()
+            if get_attn and samples:
+                interpret.save_samples(data, output, target_data, alpha, window_size, epoch, tp_file, fp_file, dicts=dicts)
+
+            #save predictions, target, hadm ids
+            yhat_raw.append(output)
+            output = np.round(output)
+            y.append(target_data)
+            yhat.append(output)
+            hids.extend(hadm_ids)
 
     #close files if needed
     if samples:
@@ -308,7 +340,8 @@ if __name__ == "__main__":
                         help="path to a file containing sorted train data. dev/test splits assumed to have same name format with 'train' replaced by 'dev' and 'test'")
     parser.add_argument("vocab", type=str, help="path to a file holding vocab word list for discretizing words")
     parser.add_argument("Y", type=str, help="size of label space")
-    parser.add_argument("model", type=str, choices=["cnn_vanilla", "rnn", "conv_attn", "multi_conv_attn", "logreg", "saved"], help="model")
+    parser.add_argument("model", type=str, choices=["cnn_vanilla", "rnn", "conv_attn", "multi_conv_attn", "logreg", "saved",
+                                                    "conv_attn_ldep", 'bert_conv_attn'], help="model")
     parser.add_argument("n_epochs", type=int, help="number of epochs to train")
     parser.add_argument("--embed-file", type=str, required=False, dest="embed_file",
                         help="path to a file holding pre-trained embeddings")
@@ -356,6 +389,8 @@ if __name__ == "__main__":
                         help="optional flag to save samples of good / bad predictions")
     parser.add_argument("--quiet", dest="quiet", action="store_const", required=False, const=True,
                         help="optional flag not to print so much during training")
+    parser.add_argument("--bert_dir", dest="bert_dir", type=str)
+    parser.add_argument("--bert_chunk_len", dest="bert_chunk_len", type=int, default=128)
     args = parser.parse_args()
     command = ' '.join(['python'] + sys.argv)
     args.command = command

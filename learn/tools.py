@@ -31,8 +31,19 @@ def pick_model(args, dicts):
         filter_size = int(args.filter_size)
         model = models.ConvAttnPool(Y, args.embed_file, filter_size, args.num_filter_maps, args.lmbda, args.gpu, dicts,
                                     embed_size=args.embed_size, dropout=args.dropout, code_emb=args.code_emb)
+    elif args.model == 'conv_attn_ldep':
+        filter_size = int(args.filter_size)
+        model = models.ConvAttnPool_ldep(Y, args.embed_file, filter_size, args.num_filter_maps, args.lmbda, args.gpu, dicts,
+                                    embed_size=args.embed_size, dropout=args.dropout, code_emb=args.code_emb)
     elif args.model == "logreg":
         model = models.BOWPool(Y, args.embed_file, args.lmbda, args.gpu, dicts, args.pool, args.embed_size, args.dropout, args.code_emb)
+
+    elif args.model == 'bert_conv_attn':
+        filter_size = int(args.filter_size)
+        model = models.Bert_ConvAttn(Y, args.embed_file, filter_size, args.num_filter_maps, args.lmbda, args.gpu, dicts,
+                                     args.bert_dir,
+                                     embed_size=args.embed_size, dropout=args.dropout, code_emb=args.code_emb)
+
     if args.test_model:
         sd = torch.load(args.test_model)
         model.load_state_dict(sd)
