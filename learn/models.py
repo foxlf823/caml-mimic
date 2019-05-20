@@ -309,7 +309,8 @@ class ConvAttnPool_ldep(BaseModel):
         xavier_uniform(self.final.weight)
 
         self.ldep = nn.Linear(Y, Y, bias=False)
-        self.ldep.weight.data.copy_(torch.eye(Y, Y))
+        xavier_uniform(self.ldep.weight)
+        #self.ldep.weight.data.copy_(torch.eye(Y, Y))
 
         # initialize with trained code embeddings if applicable
         if code_emb:
@@ -460,6 +461,73 @@ class Bert_ConvAttn(Bert_BaseModel):
         loss = self._get_loss(yhat, target, diffs)
         return yhat, loss, alpha
 
+class Bert(Bert_BaseModel):
+
+    def __init__(self, Y, embed_file, kernel_size, num_filter_maps, lmbda, gpu, dicts, bert_dir, embed_size=100, dropout=0.5,
+                 code_emb=None):
+        super(Bert, self).__init__(Y, embed_file, dicts, bert_dir, lmbda, dropout=dropout, gpu=gpu, embed_size=embed_size)
+
+        self.final = nn.Linear(self.bert_size, Y)
+        xavier_uniform(self.final.weight)
+
+        # initialize with trained code embeddings if applicable
+        if code_emb:
+            self._code_emb_init(code_emb, dicts)
+            # also set conv weights to do sum of inputs
+            weights = torch.eye(self.embed_size).unsqueeze(2).expand(-1, -1, kernel_size) / kernel_size
+            self.conv.weight.data = weights.clone()
+            self.conv.bias.data.zero_()
+
+        # conv for label descriptions as in 2.5
+        # description module has its own embedding and convolution layers
+        if lmbda > 0:
+            W = self.embed.weight.data
+            self.desc_embedding = nn.Embedding(W.size()[0], W.size()[1], padding_idx=0)
+            self.desc_embedding.weight.data = W.clone()
+
+            self.label_conv = nn.Conv1d(self.embed_size, num_filter_maps, kernel_size=kernel_size,
+                                        padding=int(floor(kernel_size / 2)))
+            xavier_uniform(self.label_conv.weight)
+
+            self.label_fc1 = nn.Linear(num_filter_maps, num_filter_maps)
+            xavier_uniform(self.label_fc1.weight)
+
+    def _code_emb_init(self, code_emb, dicts):
+        code_embs = KeyedVectors.load_word2vec_format(code_emb)
+        weights = np.zeros(self.final.weight.size())
+        for i in range(self.Y):
+            code = dicts['ind2c'][i]
+            weights[i] = code_embs[code]
+        self.U.weight.data = torch.Tensor(weights).clone()
+        self.final.weight.data = torch.Tensor(weights).clone()
+
+    def forward(self, x, target, desc_data=None, get_attention=True):
+
+        input_ids, attention_mask, token_type_ids, batch_size, chunk_num = x # input_ids (batch x chunk_num)
+        _, doc_chunk_rep = self.bert(input_ids, token_type_ids, attention_mask,
+                                                  output_all_encoded_layers=False) # doc_chunk_rep ((batch x chunk_num) bert_size)
+        doc_chunk_rep = self.bert_drop(doc_chunk_rep)
+
+        doc_rep = doc_chunk_rep.view(batch_size, chunk_num, -1) # (batch, chunk_num, bert_size)
+
+        x = doc_rep.transpose(1, 2)
+        x = F.max_pool1d(x, kernel_size=x.size(2)).squeeze(-1)
+
+        y = self.final(x)
+
+        if desc_data is not None:
+            # run descriptions through description module
+            b_batch = self.embed_descriptions(desc_data, self.gpu)
+            # get l2 similarity loss
+            diffs = self._compare_label_embeddings(target, b_batch, desc_data)
+        else:
+            diffs = None
+
+        # final sigmoid to get predictions
+        yhat = y
+        loss = self._get_loss(yhat, target, diffs)
+        return yhat, loss, None
+
 class VanillaConv(BaseModel):
 
     def __init__(self, Y, embed_file, kernel_size, num_filter_maps, gpu=-1, dicts=None, embed_size=100, dropout=0.5):
@@ -598,3 +666,184 @@ class VanillaRNN(BaseModel):
     def refresh(self, batch_size):
         self.batch_size = batch_size
         self.hidden = self.init_hidden()
+
+
+def get_sinusoid_encoding_table(n_position, d_hid, padding_idx=None):
+    ''' Sinusoid position encoding table '''
+
+    def cal_angle(position, hid_idx):
+        return position / np.power(10000, 2 * (hid_idx // 2) / d_hid)
+
+    def get_posi_angle_vec(position):
+        return [cal_angle(position, hid_j) for hid_j in range(d_hid)]
+
+    sinusoid_table = np.array([get_posi_angle_vec(pos_i) for pos_i in range(n_position)])
+
+    sinusoid_table[:, 0::2] = np.sin(sinusoid_table[:, 0::2])  # dim 2i
+    sinusoid_table[:, 1::2] = np.cos(sinusoid_table[:, 1::2])  # dim 2i+1
+
+    if padding_idx is not None:
+        # zero vector for padding dimension
+        sinusoid_table[padding_idx] = 0.
+
+    return torch.FloatTensor(sinusoid_table)
+
+class TransBaseModel(nn.Module):
+
+    def __init__(self, Y, embed_file, dicts, len_max_seq, lmbda=0, dropout=0.5, gpu=-1, embed_size=100):
+        super(TransBaseModel, self).__init__()
+        torch.manual_seed(1337)
+        self.gpu = gpu
+        self.Y = Y
+        self.embed_size = embed_size
+        self.embed_drop = nn.Dropout(p=dropout)
+        self.lmbda = lmbda
+
+        # make embedding layer
+        if embed_file:
+            print("loading pretrained embeddings...")
+            W = torch.Tensor(extract_wvs.load_embeddings(embed_file))
+
+            self.embed = nn.Embedding(W.size()[0], W.size()[1], padding_idx=0)
+            self.embed.weight.data = W.clone()
+        else:
+            # add 2 to include UNK and PAD
+            vocab_size = len(dicts['ind2w'])
+            self.embed = nn.Embedding(vocab_size + 2, embed_size, padding_idx=0)
+
+        self.position_enc = nn.Embedding.from_pretrained(
+            get_sinusoid_encoding_table(len_max_seq+1, embed_size, padding_idx=0),
+            freeze=True)
+
+    def _get_loss(self, yhat, target, diffs=None):
+        # calculate the BCE
+        loss = F.binary_cross_entropy_with_logits(yhat, target)
+
+        # add description regularization loss if relevant
+        if self.lmbda > 0 and diffs is not None:
+            diff = torch.stack(diffs).mean()
+            loss = loss + diff
+        return loss
+
+    def embed_descriptions(self, desc_data, gpu):
+        # label description embedding via convolutional layer
+        # number of labels is inconsistent across instances, so have to iterate over the batch
+        b_batch = []
+        for inst in desc_data:
+            if len(inst) > 0:
+                if gpu >= 0:
+                    lt = torch.LongTensor(inst).cuda(gpu)
+                else:
+                    lt = Variable(torch.LongTensor(inst))
+                d = self.desc_embedding(lt)
+                d = d.transpose(1, 2)
+                d = self.label_conv(d)
+                d = F.max_pool1d(F.tanh(d), kernel_size=d.size()[2])
+                d = d.squeeze(2)
+                b_inst = self.label_fc1(d)
+                b_batch.append(b_inst)
+            else:
+                b_batch.append([])
+        return b_batch
+
+    def _compare_label_embeddings(self, target, b_batch, desc_data):
+        # description regularization loss
+        # b is the embedding from description conv
+        # iterate over batch because each instance has different # labels
+        diffs = []
+        for i, bi in enumerate(b_batch):
+            ti = target[i]
+            inds = torch.nonzero(ti.data).squeeze().cpu().numpy()
+
+            zi = self.final.weight[inds, :]
+            diff = (zi - bi).mul(zi - bi).mean()
+
+            # multiply by number of labels to make sure overall mean is balanced with regard to number of labels
+            diffs.append(self.lmbda * diff * bi.size()[0])
+        return diffs
+
+from transformer.Layers import EncoderLayer
+
+class TransConvAttn(TransBaseModel):
+
+    def __init__(self, Y, embed_file, kernel_size, num_filter_maps, lmbda, gpu, dicts, len_max_seq, embed_size=100, dropout=0.5,
+                 code_emb=None):
+        super(TransConvAttn, self).__init__(Y, embed_file, dicts, len_max_seq, lmbda, dropout=dropout, gpu=gpu, embed_size=embed_size)
+
+        self.layer_stack = nn.ModuleList([
+            EncoderLayer(d_model, d_inner, n_head, d_k, d_v, dropout=dropout)
+            for _ in range(n_layers)])
+
+        # initialize conv layer as in 2.1
+        self.conv = nn.Conv1d(self.embed_size, num_filter_maps, kernel_size=kernel_size,
+                              padding=int(floor(kernel_size / 2)))
+        xavier_uniform(self.conv.weight)
+
+        # context vectors for computing attention as in 2.2
+        self.U = nn.Linear(num_filter_maps, Y)
+        xavier_uniform(self.U.weight)
+
+        # final layer: create a matrix to use for the L binary classifiers as in 2.3
+        self.final = nn.Linear(num_filter_maps, Y)
+        xavier_uniform(self.final.weight)
+
+        # initialize with trained code embeddings if applicable
+        if code_emb:
+            self._code_emb_init(code_emb, dicts)
+            # also set conv weights to do sum of inputs
+            weights = torch.eye(self.embed_size).unsqueeze(2).expand(-1, -1, kernel_size) / kernel_size
+            self.conv.weight.data = weights.clone()
+            self.conv.bias.data.zero_()
+
+        # conv for label descriptions as in 2.5
+        # description module has its own embedding and convolution layers
+        if lmbda > 0:
+            W = self.embed.weight.data
+            self.desc_embedding = nn.Embedding(W.size()[0], W.size()[1], padding_idx=0)
+            self.desc_embedding.weight.data = W.clone()
+
+            self.label_conv = nn.Conv1d(self.embed_size, num_filter_maps, kernel_size=kernel_size,
+                                        padding=int(floor(kernel_size / 2)))
+            xavier_uniform(self.label_conv.weight)
+
+            self.label_fc1 = nn.Linear(num_filter_maps, num_filter_maps)
+            xavier_uniform(self.label_fc1.weight)
+
+    def _code_emb_init(self, code_emb, dicts):
+        code_embs = KeyedVectors.load_word2vec_format(code_emb)
+        weights = np.zeros(self.final.weight.size())
+        for i in range(self.Y):
+            code = dicts['ind2c'][i]
+            weights[i] = code_embs[code]
+        self.U.weight.data = torch.Tensor(weights).clone()
+        self.final.weight.data = torch.Tensor(weights).clone()
+
+    def forward(self, x, target, desc_data=None, get_attention=True):
+        # get embeddings and apply dropout
+        x = self.embed(x)
+        x = self.embed_drop(x)
+        x = x.transpose(1, 2)
+
+        # apply convolution and nonlinearity (tanh)
+        # feili
+        # x = F.tanh(self.conv(x).transpose(1,2))
+        x = torch.tanh(self.conv(x).transpose(1, 2))
+        # apply attention
+        alpha = F.softmax(self.U.weight.matmul(x.transpose(1, 2)), dim=2)
+        # document representations are weighted sums using the attention. Can compute all at once as a matmul
+        m = alpha.matmul(x)
+        # final layer classification
+        y = self.final.weight.mul(m).sum(dim=2).add(self.final.bias)
+
+        if desc_data is not None:
+            # run descriptions through description module
+            b_batch = self.embed_descriptions(desc_data, self.gpu)
+            # get l2 similarity loss
+            diffs = self._compare_label_embeddings(target, b_batch, desc_data)
+        else:
+            diffs = None
+
+        # final sigmoid to get predictions
+        yhat = y
+        loss = self._get_loss(yhat, target, diffs)
+        return yhat, loss, alpha

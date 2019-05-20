@@ -44,6 +44,12 @@ def pick_model(args, dicts):
                                      args.bert_dir,
                                      embed_size=args.embed_size, dropout=args.dropout, code_emb=args.code_emb)
 
+    elif args.model == 'bert':
+        filter_size = int(args.filter_size)
+        model = models.Bert(Y, args.embed_file, filter_size, args.num_filter_maps, args.lmbda, args.gpu, dicts,
+                                     args.bert_dir,
+                                     embed_size=args.embed_size, dropout=args.dropout, code_emb=args.code_emb)
+
     if args.test_model:
         sd = torch.load(args.test_model)
         model.load_state_dict(sd)

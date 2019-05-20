@@ -341,7 +341,7 @@ if __name__ == "__main__":
     parser.add_argument("vocab", type=str, help="path to a file holding vocab word list for discretizing words")
     parser.add_argument("Y", type=str, help="size of label space")
     parser.add_argument("model", type=str, choices=["cnn_vanilla", "rnn", "conv_attn", "multi_conv_attn", "logreg", "saved",
-                                                    "conv_attn_ldep", 'bert_conv_attn'], help="model")
+                                                    "conv_attn_ldep", 'bert_conv_attn', 'bert', 'trans_conv_attn'], help="model")
     parser.add_argument("n_epochs", type=int, help="number of epochs to train")
     parser.add_argument("--embed-file", type=str, required=False, dest="embed_file",
                         help="path to a file holding pre-trained embeddings")
