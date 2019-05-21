@@ -49,6 +49,11 @@ def pick_model(args, dicts):
         model = models.Bert(Y, args.embed_file, filter_size, args.num_filter_maps, args.lmbda, args.gpu, dicts,
                                      args.bert_dir,
                                      embed_size=args.embed_size, dropout=args.dropout, code_emb=args.code_emb)
+    elif args.model == 'multi_conv_attn':
+        filter_size = int(args.filter_size)
+        model = models.MultiConvAttnPool(Y, args.embed_file, filter_size, args.num_filter_maps, args.lmbda, args.gpu, dicts,
+                                         args.conv_layer, args.use_res,
+                                    embed_size=args.embed_size, dropout=args.dropout, code_emb=args.code_emb)
 
     if args.test_model:
         sd = torch.load(args.test_model)

@@ -668,116 +668,56 @@ class VanillaRNN(BaseModel):
         self.hidden = self.init_hidden()
 
 
-def get_sinusoid_encoding_table(n_position, d_hid, padding_idx=None):
-    ''' Sinusoid position encoding table '''
 
-    def cal_angle(position, hid_idx):
-        return position / np.power(10000, 2 * (hid_idx // 2) / d_hid)
+class ResidualBlock(nn.Module):
+    def __init__(self, inchannel, outchannel, stride, use_res):
+        super(ResidualBlock, self).__init__()
+        self.left = nn.Sequential(
+            nn.Conv1d(inchannel, outchannel, kernel_size=3, stride=stride, padding=1, bias=False),
+            nn.BatchNorm1d(outchannel),
+            nn.ReLU(inplace=True),
+            nn.Conv1d(outchannel, outchannel, kernel_size=3, stride=1, padding=1, bias=False),
+            nn.BatchNorm1d(outchannel)
+        )
 
-    def get_posi_angle_vec(position):
-        return [cal_angle(position, hid_j) for hid_j in range(d_hid)]
+        self.use_res = use_res
+        if self.use_res:
+            self.shortcut = nn.Sequential()
+            if stride != 1 or inchannel != outchannel:
+                self.shortcut = nn.Sequential(
+                    nn.Conv1d(inchannel, outchannel, kernel_size=1, stride=stride, bias=False),
+                    nn.BatchNorm1d(outchannel)
+                )
 
-    sinusoid_table = np.array([get_posi_angle_vec(pos_i) for pos_i in range(n_position)])
+    def forward(self, x):
+        out = self.left(x)
+        if self.use_res:
+            out += self.shortcut(x)
+        out = F.relu(out)
+        return out
 
-    sinusoid_table[:, 0::2] = np.sin(sinusoid_table[:, 0::2])  # dim 2i
-    sinusoid_table[:, 1::2] = np.cos(sinusoid_table[:, 1::2])  # dim 2i+1
 
-    if padding_idx is not None:
-        # zero vector for padding dimension
-        sinusoid_table[padding_idx] = 0.
 
-    return torch.FloatTensor(sinusoid_table)
+class MultiConvAttnPool(BaseModel):
 
-class TransBaseModel(nn.Module):
-
-    def __init__(self, Y, embed_file, dicts, len_max_seq, lmbda=0, dropout=0.5, gpu=-1, embed_size=100):
-        super(TransBaseModel, self).__init__()
-        torch.manual_seed(1337)
-        self.gpu = gpu
-        self.Y = Y
-        self.embed_size = embed_size
-        self.embed_drop = nn.Dropout(p=dropout)
-        self.lmbda = lmbda
-
-        # make embedding layer
-        if embed_file:
-            print("loading pretrained embeddings...")
-            W = torch.Tensor(extract_wvs.load_embeddings(embed_file))
-
-            self.embed = nn.Embedding(W.size()[0], W.size()[1], padding_idx=0)
-            self.embed.weight.data = W.clone()
-        else:
-            # add 2 to include UNK and PAD
-            vocab_size = len(dicts['ind2w'])
-            self.embed = nn.Embedding(vocab_size + 2, embed_size, padding_idx=0)
-
-        self.position_enc = nn.Embedding.from_pretrained(
-            get_sinusoid_encoding_table(len_max_seq+1, embed_size, padding_idx=0),
-            freeze=True)
-
-    def _get_loss(self, yhat, target, diffs=None):
-        # calculate the BCE
-        loss = F.binary_cross_entropy_with_logits(yhat, target)
-
-        # add description regularization loss if relevant
-        if self.lmbda > 0 and diffs is not None:
-            diff = torch.stack(diffs).mean()
-            loss = loss + diff
-        return loss
-
-    def embed_descriptions(self, desc_data, gpu):
-        # label description embedding via convolutional layer
-        # number of labels is inconsistent across instances, so have to iterate over the batch
-        b_batch = []
-        for inst in desc_data:
-            if len(inst) > 0:
-                if gpu >= 0:
-                    lt = torch.LongTensor(inst).cuda(gpu)
-                else:
-                    lt = Variable(torch.LongTensor(inst))
-                d = self.desc_embedding(lt)
-                d = d.transpose(1, 2)
-                d = self.label_conv(d)
-                d = F.max_pool1d(F.tanh(d), kernel_size=d.size()[2])
-                d = d.squeeze(2)
-                b_inst = self.label_fc1(d)
-                b_batch.append(b_inst)
-            else:
-                b_batch.append([])
-        return b_batch
-
-    def _compare_label_embeddings(self, target, b_batch, desc_data):
-        # description regularization loss
-        # b is the embedding from description conv
-        # iterate over batch because each instance has different # labels
-        diffs = []
-        for i, bi in enumerate(b_batch):
-            ti = target[i]
-            inds = torch.nonzero(ti.data).squeeze().cpu().numpy()
-
-            zi = self.final.weight[inds, :]
-            diff = (zi - bi).mul(zi - bi).mean()
-
-            # multiply by number of labels to make sure overall mean is balanced with regard to number of labels
-            diffs.append(self.lmbda * diff * bi.size()[0])
-        return diffs
-
-from transformer.Layers import EncoderLayer
-
-class TransConvAttn(TransBaseModel):
-
-    def __init__(self, Y, embed_file, kernel_size, num_filter_maps, lmbda, gpu, dicts, len_max_seq, embed_size=100, dropout=0.5,
+    def __init__(self, Y, embed_file, kernel_size, num_filter_maps, lmbda, gpu, dicts, conv_layer, use_res, embed_size=100, dropout=0.5,
                  code_emb=None):
-        super(TransConvAttn, self).__init__(Y, embed_file, dicts, len_max_seq, lmbda, dropout=dropout, gpu=gpu, embed_size=embed_size)
-
-        self.layer_stack = nn.ModuleList([
-            EncoderLayer(d_model, d_inner, n_head, d_k, d_v, dropout=dropout)
-            for _ in range(n_layers)])
+        super(MultiConvAttnPool, self).__init__(Y, embed_file, dicts, lmbda, dropout=dropout, gpu=gpu, embed_size=embed_size)
 
         # initialize conv layer as in 2.1
-        self.conv = nn.Conv1d(self.embed_size, num_filter_maps, kernel_size=kernel_size,
-                              padding=int(floor(kernel_size / 2)))
-        xavier_uniform(self.conv.weight)
+        # self.conv = nn.Conv1d(self.embed_size, num_filter_maps, kernel_size=kernel_size,
+        #                       padding=int(floor(kernel_size / 2)))
+        # xavier_uniform(self.conv.weight)
+
+        # conv_layer=1: 64
+        # conv_layer=2: 128 64
+        # conv_layer=3: 256 128 64
+        conv_dict = {1: [self.embed_size, 64], 2: [self.embed_size, 128, 64], 3: [self.embed_size, 256, 128, 64]}
+        self.convs = nn.ModuleList()
+        conv_dimension = conv_dict[conv_layer]
+        for idx in range(conv_layer):
+            self.convs.append(ResidualBlock(conv_dimension[idx], conv_dimension[idx+1], 1, use_res))
+
 
         # context vectors for computing attention as in 2.2
         self.U = nn.Linear(num_filter_maps, Y)
@@ -827,7 +767,10 @@ class TransConvAttn(TransBaseModel):
         # apply convolution and nonlinearity (tanh)
         # feili
         # x = F.tanh(self.conv(x).transpose(1,2))
-        x = torch.tanh(self.conv(x).transpose(1, 2))
+        # x = torch.tanh(self.conv(x).transpose(1, 2))
+        for conv in self.convs:
+            x = conv(x)
+        x = x.transpose(1, 2)
         # apply attention
         alpha = F.softmax(self.U.weight.matmul(x.transpose(1, 2)), dim=2)
         # document representations are weighted sums using the attention. Can compute all at once as a matmul

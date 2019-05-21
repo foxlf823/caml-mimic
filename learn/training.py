@@ -341,7 +341,7 @@ if __name__ == "__main__":
     parser.add_argument("vocab", type=str, help="path to a file holding vocab word list for discretizing words")
     parser.add_argument("Y", type=str, help="size of label space")
     parser.add_argument("model", type=str, choices=["cnn_vanilla", "rnn", "conv_attn", "multi_conv_attn", "logreg", "saved",
-                                                    "conv_attn_ldep", 'bert_conv_attn', 'bert', 'trans_conv_attn'], help="model")
+                                                    "conv_attn_ldep", 'bert_conv_attn', 'bert', 'resnet_attn'], help="model")
     parser.add_argument("n_epochs", type=int, help="number of epochs to train")
     parser.add_argument("--embed-file", type=str, required=False, dest="embed_file",
                         help="path to a file holding pre-trained embeddings")
@@ -391,6 +391,9 @@ if __name__ == "__main__":
                         help="optional flag not to print so much during training")
     parser.add_argument("--bert_dir", dest="bert_dir", type=str)
     parser.add_argument("--bert_chunk_len", dest="bert_chunk_len", type=int, default=128)
+    parser.add_argument("--conv_layer", dest="conv_layer", type=int, default=1)
+    parser.add_argument("--use_res", dest="use_res", action="store_const", const=True, default=False)
+
     args = parser.parse_args()
     command = ' '.join(['python'] + sys.argv)
     args.command = command
