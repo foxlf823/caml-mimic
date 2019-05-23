@@ -29,7 +29,7 @@ def pick_model(args, dicts):
         model = models.VanillaConv(Y, args.embed_file, filter_size, args.num_filter_maps, args.gpu, dicts, args.embed_size, args.dropout)
     elif args.model == "conv_attn":
         filter_size = int(args.filter_size)
-        model = models.ConvAttnPool(Y, args.embed_file, filter_size, args.num_filter_maps, args.lmbda, args.gpu, dicts,
+        model = models.ConvAttnPool(args, Y, args.embed_file, filter_size, args.num_filter_maps, args.lmbda, args.gpu, dicts,
                                     embed_size=args.embed_size, dropout=args.dropout, code_emb=args.code_emb)
     elif args.model == 'conv_attn_ldep':
         filter_size = int(args.filter_size)
@@ -51,7 +51,7 @@ def pick_model(args, dicts):
                                      embed_size=args.embed_size, dropout=args.dropout, code_emb=args.code_emb)
     elif args.model == 'multi_conv_attn':
         filter_size = int(args.filter_size)
-        model = models.MultiConvAttnPool(Y, args.embed_file, filter_size, args.num_filter_maps, args.lmbda, args.gpu, dicts,
+        model = models.MultiConvAttnPool(args, Y, args.embed_file, filter_size, args.num_filter_maps, args.lmbda, args.gpu, dicts,
                                          args.conv_layer, args.use_res,
                                     embed_size=args.embed_size, dropout=args.dropout, code_emb=args.code_emb)
 

@@ -56,6 +56,41 @@ def init(args):
     
     return args, model, optimizer, params, dicts
 
+import nltk
+def prepare_instance(dicts, filename):
+    ind2w, w2ind, ind2c, c2ind, dv_dict = dicts['ind2w'], dicts['w2ind'], dicts['ind2c'], dicts['c2ind'], dicts['dv']
+    instances = []
+    with open(filename, 'r') as infile:
+        r = csv.reader(infile)
+        #header
+        next(r)
+
+        for row in r:
+
+            text = row[2]
+
+            original_text = text.split()
+            text = [int(w2ind[w]) if w in w2ind else len(w2ind) + 1 for w in original_text]
+            if args.use_pos:
+                pos_tags = nltk.pos_tag(original_text)
+                # salience
+                #pos_tags = [1 if pos_tag in args.use_pos else 0 for _, pos_tag in pos_tags]
+                pos_tags = [1 if pos_tag in args.use_pos else 2 for _, pos_tag in pos_tags]
+            # truncate long documents
+            if len(text) > MAX_LENGTH:
+                text = text[:MAX_LENGTH]
+                if args.use_pos:
+                    pos_tags = pos_tags[:MAX_LENGTH]
+
+            if args.use_pos:
+                instances.append({'row':row, 'word':text, 'pos':pos_tags})
+            else:
+                instances.append({'row': row, 'word': text})
+
+    return instances
+
+
+
 def train_epochs(args, model, optimizer, params, dicts):
     """
         Main loop. does train and test
@@ -66,6 +101,16 @@ def train_epochs(args, model, optimizer, params, dicts):
 
     test_only = args.test_model is not None
     evaluate = args.test_model is not None
+
+    # prepare instance before epoch since pos tagging is too slow
+    train_instances = prepare_instance(dicts, args.data_path)
+    print("train_instances {}".format(len(train_instances)))
+    dev_instances = prepare_instance(dicts, args.data_path.replace('train','dev'))
+    print("dev_instances {}".format(len(dev_instances)))
+    test_instances = prepare_instance(dicts, args.data_path.replace('train','test'))
+    print("test_instances {}".format(len(test_instances)))
+
+
     #train for n_epochs unless criterion metric does not improve for [patience] epochs
     for epoch in range(args.n_epochs):
         #only test on train/test set on very last epoch
@@ -77,7 +122,7 @@ def train_epochs(args, model, optimizer, params, dicts):
             model_dir = os.path.dirname(os.path.abspath(args.test_model))
         metrics_all = one_epoch(args, model, optimizer, args.Y, epoch, args.n_epochs, args.batch_size, args.data_path,
                                                   args.version, test_only, dicts, model_dir, 
-                                                  args.samples, args.gpu, args.quiet)
+                                                  args.samples, args.gpu, args.quiet, train_instances, dev_instances, test_instances)
         for name in metrics_all[0].keys():
             metrics_hist[name].append(metrics_all[0][name])
         for name in metrics_all[1].keys():
@@ -116,13 +161,13 @@ def early_stop(metrics_hist, criterion, patience):
         return False
         
 def one_epoch(args, model, optimizer, Y, epoch, n_epochs, batch_size, data_path, version, testing, dicts, model_dir,
-              samples, gpu, quiet):
+              samples, gpu, quiet, train_instances, dev_instances, test_instances):
     """
         Wrapper to do a training epoch and test on dev
     """
     if not testing:
         epoch_start = time.time()
-        losses, unseen_code_inds = train(args, model, optimizer, Y, epoch, batch_size, data_path, gpu, version, dicts, quiet)
+        losses, unseen_code_inds = train(args, model, optimizer, Y, epoch, batch_size, data_path, gpu, version, dicts, quiet, train_instances)
         loss = np.mean(losses)
         epoch_finish = time.time()
         print("epoch finish in %.2fs, loss: %.4f" % (epoch_finish-epoch_start, loss))
@@ -152,11 +197,11 @@ def one_epoch(args, model, optimizer, Y, epoch, n_epochs, batch_size, data_path,
 
     #test on dev
     metrics = test(args, model, Y, epoch, data_path, fold, gpu, version, unseen_code_inds, dicts, samples, model_dir,
-                   testing)
+                   testing, dev_instances)
     if testing or epoch == n_epochs - 1:
         print("\nevaluating on test")
         metrics_te = test(args, model, Y, epoch, data_path, "test", gpu, version, unseen_code_inds, dicts, samples,
-                          model_dir, True)
+                          model_dir, True, test_instances)
     else:
         metrics_te = defaultdict(float)
         fpr_te = defaultdict(lambda: [])
@@ -166,7 +211,7 @@ def one_epoch(args, model, optimizer, Y, epoch, n_epochs, batch_size, data_path,
     return metrics_all
 
 
-def train(args, model, optimizer, Y, epoch, batch_size, data_path, gpu, version, dicts, quiet):
+def train(args, model, optimizer, Y, epoch, batch_size, data_path, gpu, version, dicts, quiet, instances):
     """
         Training loop.
         output: losses for each example for this iteration
@@ -187,7 +232,7 @@ def train(args, model, optimizer, Y, epoch, batch_size, data_path, gpu, version,
         tokenizer = BertTokenizer.from_pretrained(args.bert_dir)
     else:
         tokenizer = None
-    gen = datasets.data_generator(args, tokenizer, data_path, dicts, batch_size, num_labels, version=version, desc_embed=desc_embed)
+    gen = datasets.data_generator(instances, args, tokenizer, data_path, dicts, batch_size, num_labels, version=version, desc_embed=desc_embed)
     #for batch_idx, tup in tqdm(enumerate(gen)):
     for batch_idx, tup in enumerate(gen):
         data, target, _, code_set, descs = tup
@@ -195,7 +240,11 @@ def train(args, model, optimizer, Y, epoch, batch_size, data_path, gpu, version,
             word, mask, segment, batch_size, chunk_num = data
             data, target = (torch.LongTensor(word), torch.LongTensor(mask), torch.LongTensor(segment), batch_size, chunk_num), torch.FloatTensor(target)
         else:
-            data, target = torch.LongTensor(data), torch.FloatTensor(target)
+            if args.use_pos:
+                word, pos = data
+                data, target = (torch.LongTensor(word), torch.LongTensor(pos)), torch.FloatTensor(target)
+            else:
+                data, target = torch.LongTensor(data), torch.FloatTensor(target)
         unseen_code_inds = unseen_code_inds.difference(code_set)
         if gpu >= 0:
             if args.model.find("bert") != -1:
@@ -203,8 +252,13 @@ def train(args, model, optimizer, Y, epoch, batch_size, data_path, gpu, version,
                 data = (word.cuda(gpu), mask.cuda(gpu), segment.cuda(gpu), batch_size, chunk_num)
                 target = target.cuda(gpu)
             else:
-                data = data.cuda(gpu)
-                target = target.cuda(gpu)
+                if args.use_pos:
+                    word, pos = data
+                    data = (word.cuda(gpu), pos.cuda(gpu))
+                    target = target.cuda(gpu)
+                else:
+                    data = data.cuda(gpu)
+                    target = target.cuda(gpu)
         optimizer.zero_grad()
 
         if desc_embed:
@@ -238,7 +292,7 @@ def unseen_code_vecs(model, code_inds, dicts, gpu):
     model.final.weight.data[code_inds, :] = desc_embeddings.data
     model.final.bias.data[code_inds] = 0
 
-def test(args, model, Y, epoch, data_path, fold, gpu, version, code_inds, dicts, samples, model_dir, testing):
+def test(args, model, Y, epoch, data_path, fold, gpu, version, code_inds, dicts, samples, model_dir, testing, instances):
     """
         Testing loop.
         Returns metrics
@@ -265,7 +319,7 @@ def test(args, model, Y, epoch, data_path, fold, gpu, version, code_inds, dicts,
         tokenizer = BertTokenizer.from_pretrained(args.bert_dir)
     else:
         tokenizer = None
-    gen = datasets.data_generator(args, tokenizer, filename, dicts, 1, num_labels, version=version, desc_embed=desc_embed)
+    gen = datasets.data_generator(instances, args, tokenizer, filename, dicts, 1, num_labels, version=version, desc_embed=desc_embed)
     #for batch_idx, tup in tqdm(enumerate(gen)):
     for batch_idx, tup in enumerate(gen):
         with torch.no_grad():
@@ -276,7 +330,11 @@ def test(args, model, Y, epoch, data_path, fold, gpu, version, code_inds, dicts,
                 data, target = (torch.LongTensor(word), torch.LongTensor(mask), torch.LongTensor(segment), batch_size,
                             chunk_num), torch.FloatTensor(target)
             else:
-                data, target = torch.LongTensor(data), torch.FloatTensor(target)
+                if args.use_pos:
+                    word, pos = data
+                    data, target = (torch.LongTensor(word), torch.LongTensor(pos)), torch.FloatTensor(target)
+                else:
+                    data, target = torch.LongTensor(data), torch.FloatTensor(target)
 
             if gpu >= 0:
                 if args.model.find("bert") != -1:
@@ -284,8 +342,13 @@ def test(args, model, Y, epoch, data_path, fold, gpu, version, code_inds, dicts,
                     data = (word.cuda(gpu), mask.cuda(gpu), segment.cuda(gpu), batch_size, chunk_num)
                     target = target.cuda(gpu)
                 else:
-                    data = data.cuda(gpu)
-                    target = target.cuda(gpu)
+                    if args.use_pos:
+                        word, pos = data
+                        data = (word.cuda(gpu), pos.cuda(gpu))
+                        target = target.cuda(gpu)
+                    else:
+                        data = data.cuda(gpu)
+                        target = target.cuda(gpu)
 
             model.zero_grad()
 
@@ -393,9 +456,22 @@ if __name__ == "__main__":
     parser.add_argument("--bert_chunk_len", dest="bert_chunk_len", type=int, default=128)
     parser.add_argument("--conv_layer", dest="conv_layer", type=int, default=1)
     parser.add_argument("--use_res", dest="use_res", action="store_const", const=True, default=False)
-
+    parser.add_argument("--use_ext_emb", dest="use_ext_emb", action="store_const", const=True, default=False)
+    parser.add_argument("--use_pos", dest="use_pos", type=str, default=None, help='NN,VBP')
+    parser.add_argument('--random_seed', type=int, default=1)
     args = parser.parse_args()
     command = ' '.join(['python'] + sys.argv)
     args.command = command
+
+    if args.use_pos:
+        pos_tags = args.use_pos.split(",")
+        args.use_pos = pos_tags
+
+    if args.random_seed != 0:
+        random.seed(args.random_seed)
+        np.random.seed(args.random_seed)
+        torch.manual_seed(args.random_seed)
+        torch.cuda.manual_seed_all(args.random_seed)
+
     main(args)
 

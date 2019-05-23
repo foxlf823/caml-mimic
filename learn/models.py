@@ -22,12 +22,59 @@ from dataproc import extract_wvs
 
 from pytorch_pretrained_bert import BertModel, BertConfig
 import os
+from embedding import load_pretrain_emb
+import re
+
+def build_pretrain_embedding(embedding_path, word_alphabet):
+
+    embedd_dict, embedd_dim = load_pretrain_emb(embedding_path)
+    alphabet_size = len(word_alphabet)
+
+    scale = np.sqrt(3.0 / embedd_dim)
+    pretrain_emb = np.zeros([len(word_alphabet)+2, embedd_dim], dtype=np.float32)  # add 2 to include UNK and PAD
+    perfect_match = 0
+    case_match = 0
+    digits_replaced_with_zeros_found = 0
+    lowercase_and_digits_replaced_with_zeros_found = 0
+    not_match = 0
+    for word, index in word_alphabet.items():
+        if word in embedd_dict:
+
+            pretrain_emb[index,:] = embedd_dict[word]
+            perfect_match += 1
+
+        elif word.lower() in embedd_dict:
+
+            pretrain_emb[index,:] = embedd_dict[word.lower()]
+            case_match += 1
+
+        elif re.sub('\d', '0', word) in embedd_dict:
+
+            pretrain_emb[index,:] = embedd_dict[re.sub('\d', '0', word)]
+            digits_replaced_with_zeros_found += 1
+
+        elif re.sub('\d', '0', word.lower()) in embedd_dict:
+
+            pretrain_emb[index,:] = embedd_dict[re.sub('\d', '0', word.lower())]
+            lowercase_and_digits_replaced_with_zeros_found += 1
+
+        else:
+            pretrain_emb[index,:] = np.random.uniform(-scale, scale, [1, embedd_dim])
+            not_match += 1
+    pretrained_size = len(embedd_dict)
+    print("pretrained word emb size {}".format(pretrained_size))
+    print("prefect match:%s, case_match:%s, dig_zero_match:%s, "
+                 "case_dig_zero_match:%s, not_match:%s"
+                 %(perfect_match, case_match, digits_replaced_with_zeros_found,
+                   lowercase_and_digits_replaced_with_zeros_found, not_match))
+    print('oov: %.2f%%' % (not_match*100.0/alphabet_size))
+    return pretrain_emb, embedd_dim
 
 class BaseModel(nn.Module):
 
-    def __init__(self, Y, embed_file, dicts, lmbda=0, dropout=0.5, gpu=-1, embed_size=100):
+    def __init__(self, args, Y, embed_file, dicts, lmbda=0, dropout=0.5, gpu=-1, embed_size=100):
         super(BaseModel, self).__init__()
-        torch.manual_seed(1337)
+        #torch.manual_seed(1337)
         self.gpu = gpu
         self.Y = Y
         self.embed_size = embed_size
@@ -36,8 +83,13 @@ class BaseModel(nn.Module):
 
         #make embedding layer
         if embed_file:
-            print("loading pretrained embeddings...")
-            W = torch.Tensor(extract_wvs.load_embeddings(embed_file))
+            print("loading pretrained embeddings from {}".format(embed_file))
+            if args.use_ext_emb:
+                pretrain_word_embedding, pretrain_emb_dim = build_pretrain_embedding(embed_file, dicts['w2ind'])
+                W = torch.from_numpy(pretrain_word_embedding)
+                self.embed_size = pretrain_emb_dim
+            else:
+                W = torch.Tensor(extract_wvs.load_embeddings(embed_file))
 
             self.embed = nn.Embedding(W.size()[0], W.size()[1], padding_idx=0)
             self.embed.weight.data = W.clone()
@@ -45,6 +97,12 @@ class BaseModel(nn.Module):
             #add 2 to include UNK and PAD
             vocab_size = len(dicts['ind2w'])
             self.embed = nn.Embedding(vocab_size+2, embed_size, padding_idx=0)
+
+        self.use_pos = args.use_pos
+        if self.use_pos:
+            # salience
+            #self.pos_embed = nn.Embedding(2, self.embed.embedding_dim, padding_idx=0)
+            self.pos_embed = nn.Embedding(3, self.embed.embedding_dim, padding_idx=0)
             
 
     def _get_loss(self, yhat, target, diffs=None):
@@ -99,7 +157,7 @@ class Bert_BaseModel(nn.Module):
 
     def __init__(self, Y, embed_file, dicts, bert_dir, lmbda=0, dropout=0.5, gpu=-1, embed_size=100):
         super(Bert_BaseModel, self).__init__()
-        torch.manual_seed(1337)
+        #torch.manual_seed(1337)
         self.gpu = gpu
         self.Y = Y
         self.embed_size = embed_size
@@ -213,11 +271,15 @@ class BOWPool(BaseModel):
 
 class ConvAttnPool(BaseModel):
 
-    def __init__(self, Y, embed_file, kernel_size, num_filter_maps, lmbda, gpu, dicts, embed_size=100, dropout=0.5, code_emb=None):
-        super(ConvAttnPool, self).__init__(Y, embed_file, dicts, lmbda, dropout=dropout, gpu=gpu, embed_size=embed_size)
+    def __init__(self, args, Y, embed_file, kernel_size, num_filter_maps, lmbda, gpu, dicts, embed_size=100, dropout=0.5, code_emb=None):
+        super(ConvAttnPool, self).__init__(args, Y, embed_file, dicts, lmbda, dropout=dropout, gpu=gpu, embed_size=embed_size)
 
-        #initialize conv layer as in 2.1
-        self.conv = nn.Conv1d(self.embed_size, num_filter_maps, kernel_size=kernel_size, padding=int(floor(kernel_size/2)))
+        if self.use_pos:
+            self.conv = nn.Conv1d(self.embed_size*2, num_filter_maps, kernel_size=kernel_size,
+                                  padding=int(floor(kernel_size / 2)))
+        else:
+            #initialize conv layer as in 2.1
+            self.conv = nn.Conv1d(self.embed_size, num_filter_maps, kernel_size=kernel_size, padding=int(floor(kernel_size/2)))
         xavier_uniform(self.conv.weight)
 
         #context vectors for computing attention as in 2.2
@@ -259,8 +321,13 @@ class ConvAttnPool(BaseModel):
         self.final.weight.data = torch.Tensor(weights).clone()
         
     def forward(self, x, target, desc_data=None, get_attention=True):
-        #get embeddings and apply dropout
-        x = self.embed(x)
+
+        if self.use_pos:
+            word, pos = x
+            x = torch.cat([self.embed(word), self.pos_embed(pos)], dim=-1)
+        else:
+            x = self.embed(x)
+
         x = self.embed_drop(x)
         x = x.transpose(1, 2)
 
@@ -670,7 +737,7 @@ class VanillaRNN(BaseModel):
 
 
 class ResidualBlock(nn.Module):
-    def __init__(self, inchannel, outchannel, stride, use_res):
+    def __init__(self, inchannel, outchannel, stride, use_res, dropout):
         super(ResidualBlock, self).__init__()
         self.left = nn.Sequential(
             nn.Conv1d(inchannel, outchannel, kernel_size=3, stride=stride, padding=1, bias=False),
@@ -689,20 +756,23 @@ class ResidualBlock(nn.Module):
                     nn.BatchNorm1d(outchannel)
                 )
 
+        self.dropout = nn.Dropout(p=dropout)
+
     def forward(self, x):
         out = self.left(x)
         if self.use_res:
             out += self.shortcut(x)
         out = F.relu(out)
+        out = self.dropout(out)
         return out
 
 
 
 class MultiConvAttnPool(BaseModel):
 
-    def __init__(self, Y, embed_file, kernel_size, num_filter_maps, lmbda, gpu, dicts, conv_layer, use_res, embed_size=100, dropout=0.5,
+    def __init__(self, args, Y, embed_file, kernel_size, num_filter_maps, lmbda, gpu, dicts, conv_layer, use_res, embed_size=100, dropout=0.5,
                  code_emb=None):
-        super(MultiConvAttnPool, self).__init__(Y, embed_file, dicts, lmbda, dropout=dropout, gpu=gpu, embed_size=embed_size)
+        super(MultiConvAttnPool, self).__init__(args, Y, embed_file, dicts, lmbda, dropout=dropout, gpu=gpu, embed_size=embed_size)
 
         # initialize conv layer as in 2.1
         # self.conv = nn.Conv1d(self.embed_size, num_filter_maps, kernel_size=kernel_size,
@@ -712,11 +782,17 @@ class MultiConvAttnPool(BaseModel):
         # conv_layer=1: 64
         # conv_layer=2: 128 64
         # conv_layer=3: 256 128 64
-        conv_dict = {1: [self.embed_size, 64], 2: [self.embed_size, 128, 64], 3: [self.embed_size, 256, 128, 64]}
+
+        if self.use_pos:
+            conv_dict = {1: [self.embed_size*2, 64], 2: [self.embed_size*2, 128, 64], 3: [self.embed_size*2, 256, 128, 64]}
+        else:
+            conv_dict = {1: [self.embed_size, 64], 2: [self.embed_size, 128, 64], 3: [self.embed_size, 256, 128, 64]}
+
+
         self.convs = nn.ModuleList()
         conv_dimension = conv_dict[conv_layer]
         for idx in range(conv_layer):
-            self.convs.append(ResidualBlock(conv_dimension[idx], conv_dimension[idx+1], 1, use_res))
+            self.convs.append(ResidualBlock(conv_dimension[idx], conv_dimension[idx+1], 1, use_res, dropout))
 
 
         # context vectors for computing attention as in 2.2
@@ -759,8 +835,13 @@ class MultiConvAttnPool(BaseModel):
         self.final.weight.data = torch.Tensor(weights).clone()
 
     def forward(self, x, target, desc_data=None, get_attention=True):
-        # get embeddings and apply dropout
-        x = self.embed(x)
+
+        if self.use_pos:
+            word, pos = x
+            x = torch.cat([self.embed(word), self.pos_embed(pos)], dim=-1)
+        else:
+            x = self.embed(x)
+
         x = self.embed_drop(x)
         x = x.transpose(1, 2)
 

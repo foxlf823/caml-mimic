@@ -9,12 +9,13 @@ import sys
 
 from constants import *
 from pytorch_pretrained_bert import BertTokenizer
+import nltk
 
 class Batch:
     """
         This class and the data_generator could probably be replaced with a PyTorch DataLoader
     """
-    def __init__(self, desc_embed):
+    def __init__(self, desc_embed, args):
         self.docs = []
         self.labels = []
         self.hadm_ids = []
@@ -23,14 +24,17 @@ class Batch:
         self.max_length = MAX_LENGTH
         self.desc_embed = desc_embed
         self.descs = []
+        self.use_pos = args.use_pos
+        if self.use_pos:
+            self.docs_pos = []
 
-    def add_instance(self, row, ind2c, c2ind, w2ind, dv_dict, num_labels):
+    def add_instance(self, instance, ind2c, c2ind, w2ind, dv_dict, num_labels):
         """
             Makes an instance to add to this batch from given row data, with a bunch of lookups
         """
-        labels = set()
+        row = instance['row']
         hadm_id = int(row[1])
-        text = row[2]
+
         length = int(row[4])
         cur_code_set = set()
         labels_idx = np.zeros(num_labels)
@@ -54,13 +58,15 @@ class Batch:
                 else:
                     desc_vecs.append([len(w2ind)+1])
         #OOV words are given a unique index at end of vocab lookup
-        text = [int(w2ind[w]) if w in w2ind else len(w2ind)+1 for w in text.split()]
-        #truncate long documents
-        if len(text) > self.max_length:
-            text = text[:self.max_length]
+
+        text = instance['word']
+        if self.use_pos:
+            pos_tags = instance['pos']
 
         #build instance
         self.docs.append(text)
+        if self.use_pos:
+            self.docs_pos.append(pos_tags)
         self.labels.append(labels_idx)
         self.hadm_ids.append(hadm_id)
         self.code_set = self.code_set.union(cur_code_set)
@@ -72,15 +78,29 @@ class Batch:
     def pad_docs(self):
         #pad all docs to have self.length
         padded_docs = []
-        for doc in self.docs:
+        if self.use_pos:
+            padded_doc_pos = []
+        for i, doc in enumerate(self.docs):
             if len(doc) < self.length:
                 doc.extend([0] * (self.length - len(doc)))
             padded_docs.append(doc)
+
+            if self.use_pos:
+                doc_pos = self.docs_pos[i]
+                if len(doc_pos) < self.length:
+                    doc_pos.extend([0] * (self.length - len(doc_pos)))
+                padded_doc_pos.append(doc_pos)
         self.docs = padded_docs
+        if self.use_pos:
+            self.docs_pos = padded_doc_pos
 
     def to_ret(self):
-        return np.array(self.docs), np.array(self.labels), np.array(self.hadm_ids), self.code_set,\
-               np.array(self.descs)
+        if self.use_pos:
+            return (np.array(self.docs), np.array(self.docs_pos)), np.array(self.labels), np.array(self.hadm_ids), self.code_set, \
+                   np.array(self.descs)
+        else:
+            return np.array(self.docs), np.array(self.labels), np.array(self.hadm_ids), self.code_set,\
+                   np.array(self.descs)
 
 class Batch_bert:
     """
@@ -212,7 +232,7 @@ def pad_desc_vecs(desc_vecs):
         pad_vecs.append(vec)
     return pad_vecs
 
-def data_generator(args, tokenizer, filename, dicts, batch_size, num_labels, desc_embed=False, version='mimic3'):
+def data_generator(instances, args, tokenizer, filename, dicts, batch_size, num_labels, desc_embed=False, version='mimic3'):
     """
         Inputs:
             filename: holds data sorted by sequence length, for best batching
@@ -225,27 +245,24 @@ def data_generator(args, tokenizer, filename, dicts, batch_size, num_labels, des
             np arrays with data for training loop.
     """
     ind2w, w2ind, ind2c, c2ind, dv_dict = dicts['ind2w'], dicts['w2ind'], dicts['ind2c'], dicts['c2ind'], dicts['dv']
-    with open(filename, 'r') as infile:
-        r = csv.reader(infile)
-        #header
-        next(r)
-        if args.model.find("bert") != -1:
-            cur_inst = Batch_bert(desc_embed, tokenizer, args.bert_chunk_len)
-        else:
-            cur_inst = Batch(desc_embed)
-        for row in r:
-            #find the next `batch_size` instances
-            if len(cur_inst.docs) == batch_size:
-                cur_inst.pad_docs()
-                yield cur_inst.to_ret()
-                #clear
-                if args.model.find("bert") != -1:
-                    cur_inst = Batch_bert(desc_embed, tokenizer, args.bert_chunk_len)
-                else:
-                    cur_inst = Batch(desc_embed)
-            cur_inst.add_instance(row, ind2c, c2ind, w2ind, dv_dict, num_labels)
-        cur_inst.pad_docs()
-        yield cur_inst.to_ret()
+
+    if args.model.find("bert") != -1:
+        cur_inst = Batch_bert(desc_embed, tokenizer, args.bert_chunk_len)
+    else:
+        cur_inst = Batch(desc_embed, args)
+    for instance in instances:
+        #find the next `batch_size` instances
+        if len(cur_inst.docs) == batch_size:
+            cur_inst.pad_docs()
+            yield cur_inst.to_ret()
+            #clear
+            if args.model.find("bert") != -1:
+                cur_inst = Batch_bert(desc_embed, tokenizer, args.bert_chunk_len)
+            else:
+                cur_inst = Batch(desc_embed, args)
+        cur_inst.add_instance(instance, ind2c, c2ind, w2ind, dv_dict, num_labels)
+    cur_inst.pad_docs()
+    yield cur_inst.to_ret()
 
 def load_vocab_dict(args, vocab_file):
     #reads vocab_file into two lookups (word:ind) and (ind:word)
@@ -278,6 +295,8 @@ def load_vocab_dict(args, vocab_file):
     with open(vocab_file, 'r') as vocabfile:
         for i, line in enumerate(vocabfile):
             line = line.rstrip()
+            # if line.strip() in vocab:
+            #     print(line)
             if line != '':
                 vocab.add(line.strip())
     # hack because the vocabs were created differently for these models
