@@ -26,6 +26,8 @@ import learn.models as models
 import learn.tools as tools
 from pytorch_pretrained_bert import BertTokenizer
 
+from torch.utils.data import DataLoader, Dataset
+
 def main(args):
     start = time.time()
     args, model, optimizer, params, dicts = init(args)
@@ -56,10 +58,23 @@ def init(args):
     
     return args, model, optimizer, params, dicts
 
+def pad_desc_vecs(desc_vecs):
+    #pad all description vectors in a batch to have the same length
+    desc_len = max([len(dv) for dv in desc_vecs])
+    pad_vecs = []
+    for vec in desc_vecs:
+        if len(vec) < desc_len:
+            vec.extend([0] * (desc_len - len(vec)))
+        pad_vecs.append(vec)
+    return pad_vecs
+
 import nltk
-def prepare_instance(dicts, filename):
+def prepare_instance(dicts, filename, args):
     ind2w, w2ind, ind2c, c2ind, dv_dict = dicts['ind2w'], dicts['w2ind'], dicts['ind2c'], dicts['c2ind'], dicts['dv']
     instances = []
+    num_labels = len(dicts['ind2c'])
+    desc_embed = args.lmbda > 0
+
     with open(filename, 'r') as infile:
         r = csv.reader(infile)
         #header
@@ -68,6 +83,29 @@ def prepare_instance(dicts, filename):
         for row in r:
 
             text = row[2]
+            hadm_id = int(row[1])
+            length = int(row[4])
+            cur_code_set = set()
+            labels_idx = np.zeros(num_labels)
+            labelled = False
+            desc_vecs = []
+            for l in row[3].split(';'):
+                if l in c2ind.keys():
+                    code = int(c2ind[l])
+                    labels_idx[code] = 1
+                    cur_code_set.add(code)
+                    labelled = True
+            if not labelled:
+                continue
+
+            if desc_embed:
+                for code in cur_code_set:
+                    l = ind2c[code]
+                    if l in dv_dict.keys():
+                        # need to copy or description padding will get screwed up
+                        desc_vecs.append(dv_dict[l][:])
+                    else:
+                        desc_vecs.append([len(w2ind) + 1])
 
             original_text = text.split()
             text = [int(w2ind[w]) if w in w2ind else len(w2ind) + 1 for w in original_text]
@@ -82,14 +120,84 @@ def prepare_instance(dicts, filename):
                 if args.use_pos:
                     pos_tags = pos_tags[:MAX_LENGTH]
 
+
+            dict_instance = {'row': row, 'word': text, 'label':labels_idx, 'hadm_id':hadm_id,
+                             'cur_code_set':cur_code_set}
             if args.use_pos:
-                instances.append({'row':row, 'word':text, 'pos':pos_tags})
-            else:
-                instances.append({'row': row, 'word': text})
+                dict_instance['pos'] = pos_tags
+
+            if desc_embed:
+                dict_instance['desc'] = pad_desc_vecs(desc_vecs)
+
+            instances.append(dict_instance)
 
     return instances
 
+class MyDataset(Dataset):
 
+    def __init__(self, X):
+        self.X = X
+
+
+    def __len__(self):
+        return len(self.X)
+
+    def __getitem__(self, idx):
+        return self.X[idx]
+
+def pad_sequence(x, max_len):
+
+    padded_x = np.zeros((len(x), max_len), dtype=np.int)
+    for i, row in enumerate(x):
+        padded_x[i][:len(row)] = row
+
+    return padded_x
+
+def my_collate(x):
+    if 'pos' in x[0]:
+        use_pos = True
+    else:
+        use_pos = False
+    docs = [x_['word'] for x_ in x]
+    if use_pos:
+        docs_pos = [x_['pos'] for x_ in x]
+    labels = [x_['label'] for x_ in x]
+    lengths = [len(x_['word']) for x_ in x]
+    length = max(lengths)
+
+
+    padded_docs = pad_sequence(docs, length)
+    if use_pos:
+        padded_doc_pos = pad_sequence(docs_pos, length)
+    # for i, doc in enumerate(docs):
+    #     if len(doc) < length:
+    #         doc.extend([0] * (length - len(doc)))
+    #     padded_docs.append(doc)
+    #
+    #     if use_pos:
+    #         doc_pos = docs_pos[i]
+    #         if len(doc_pos) < length:
+    #             doc_pos.extend([0] * (length - len(doc_pos)))
+    #         padded_doc_pos.append(doc_pos)
+
+
+    hadm_ids = [x_['hadm_id'] for x_ in x]
+    code_set = set()
+    for x_ in x:
+        code_set = code_set.union(x_['cur_code_set'])
+
+    if 'desc' in x[0]:
+        descs = [x_['desc'] for x_ in x]
+    else:
+        descs = []
+
+
+    if use_pos:
+        return (padded_docs, padded_doc_pos), np.array(labels), np.array(hadm_ids), code_set, \
+               np.array(descs)
+    else:
+        return padded_docs, np.array(labels), np.array(hadm_ids), code_set, \
+               np.array(descs)
 
 def train_epochs(args, model, optimizer, params, dicts):
     """
@@ -103,13 +211,18 @@ def train_epochs(args, model, optimizer, params, dicts):
     evaluate = args.test_model is not None
 
     # prepare instance before epoch since pos tagging is too slow
-    train_instances = prepare_instance(dicts, args.data_path)
+    train_instances = prepare_instance(dicts, args.data_path, args)
     print("train_instances {}".format(len(train_instances)))
-    dev_instances = prepare_instance(dicts, args.data_path.replace('train','dev'))
+    dev_instances = prepare_instance(dicts, args.data_path.replace('train','dev'), args)
     print("dev_instances {}".format(len(dev_instances)))
-    test_instances = prepare_instance(dicts, args.data_path.replace('train','test'))
+    test_instances = prepare_instance(dicts, args.data_path.replace('train','test'), args)
     print("test_instances {}".format(len(test_instances)))
+    # train_instances = dev_instances
+    # test_instances = dev_instances
 
+    train_loader = DataLoader(MyDataset(train_instances), args.batch_size, shuffle=False, collate_fn=my_collate)
+    dev_loader = DataLoader(MyDataset(dev_instances), 1, shuffle=False, collate_fn=my_collate)
+    test_loader = DataLoader(MyDataset(test_instances), 1, shuffle=False, collate_fn=my_collate)
 
     #train for n_epochs unless criterion metric does not improve for [patience] epochs
     for epoch in range(args.n_epochs):
@@ -122,7 +235,8 @@ def train_epochs(args, model, optimizer, params, dicts):
             model_dir = os.path.dirname(os.path.abspath(args.test_model))
         metrics_all = one_epoch(args, model, optimizer, args.Y, epoch, args.n_epochs, args.batch_size, args.data_path,
                                                   args.version, test_only, dicts, model_dir, 
-                                                  args.samples, args.gpu, args.quiet, train_instances, dev_instances, test_instances)
+                                                  args.samples, args.gpu, args.quiet, train_instances, dev_instances, test_instances,
+                                train_loader, dev_loader, test_loader)
         for name in metrics_all[0].keys():
             metrics_hist[name].append(metrics_all[0][name])
         for name in metrics_all[1].keys():
@@ -161,13 +275,14 @@ def early_stop(metrics_hist, criterion, patience):
         return False
         
 def one_epoch(args, model, optimizer, Y, epoch, n_epochs, batch_size, data_path, version, testing, dicts, model_dir,
-              samples, gpu, quiet, train_instances, dev_instances, test_instances):
+              samples, gpu, quiet, train_instances, dev_instances, test_instances, train_loader, dev_loader, test_loader):
     """
         Wrapper to do a training epoch and test on dev
     """
     if not testing:
         epoch_start = time.time()
-        losses, unseen_code_inds = train(args, model, optimizer, Y, epoch, batch_size, data_path, gpu, version, dicts, quiet, train_instances)
+        losses, unseen_code_inds = train(args, model, optimizer, Y, epoch, batch_size, data_path, gpu, version, dicts, quiet,
+                                         train_instances, train_loader)
         loss = np.mean(losses)
         epoch_finish = time.time()
         print("epoch finish in %.2fs, loss: %.4f" % (epoch_finish-epoch_start, loss))
@@ -197,11 +312,11 @@ def one_epoch(args, model, optimizer, Y, epoch, n_epochs, batch_size, data_path,
 
     #test on dev
     metrics = test(args, model, Y, epoch, data_path, fold, gpu, version, unseen_code_inds, dicts, samples, model_dir,
-                   testing, dev_instances)
+                   testing, dev_instances, dev_loader)
     if testing or epoch == n_epochs - 1:
         print("\nevaluating on test")
         metrics_te = test(args, model, Y, epoch, data_path, "test", gpu, version, unseen_code_inds, dicts, samples,
-                          model_dir, True, test_instances)
+                          model_dir, True, test_instances, test_loader)
     else:
         metrics_te = defaultdict(float)
         fpr_te = defaultdict(lambda: [])
@@ -211,7 +326,7 @@ def one_epoch(args, model, optimizer, Y, epoch, n_epochs, batch_size, data_path,
     return metrics_all
 
 
-def train(args, model, optimizer, Y, epoch, batch_size, data_path, gpu, version, dicts, quiet, instances):
+def train(args, model, optimizer, Y, epoch, batch_size, data_path, gpu, version, dicts, quiet, instances, data_loader):
     """
         Training loop.
         output: losses for each example for this iteration
@@ -232,10 +347,16 @@ def train(args, model, optimizer, Y, epoch, batch_size, data_path, gpu, version,
         tokenizer = BertTokenizer.from_pretrained(args.bert_dir)
     else:
         tokenizer = None
-    gen = datasets.data_generator(instances, args, tokenizer, data_path, dicts, batch_size, num_labels, version=version, desc_embed=desc_embed)
-    #for batch_idx, tup in tqdm(enumerate(gen)):
-    for batch_idx, tup in enumerate(gen):
-        data, target, _, code_set, descs = tup
+    # gen = datasets.data_generator(instances, args, tokenizer, data_path, dicts, batch_size, num_labels, version=version, desc_embed=desc_embed)
+    # for batch_idx, tup in enumerate(gen):
+    #     data, target, _, code_set, descs = tup
+
+    # loader
+    data_iter = iter(data_loader)
+    num_iter = len(data_loader)
+    for i in range(num_iter):
+        data, target, _, code_set, descs = next(data_iter)
+
         if args.model.find("bert") != -1:
             word, mask, segment, batch_size, chunk_num = data
             data, target = (torch.LongTensor(word), torch.LongTensor(mask), torch.LongTensor(segment), batch_size, chunk_num), torch.FloatTensor(target)
@@ -292,7 +413,8 @@ def unseen_code_vecs(model, code_inds, dicts, gpu):
     model.final.weight.data[code_inds, :] = desc_embeddings.data
     model.final.bias.data[code_inds] = 0
 
-def test(args, model, Y, epoch, data_path, fold, gpu, version, code_inds, dicts, samples, model_dir, testing, instances):
+def test(args, model, Y, epoch, data_path, fold, gpu, version, code_inds, dicts, samples, model_dir, testing,
+         instances, data_loader):
     """
         Testing loop.
         Returns metrics
@@ -319,12 +441,17 @@ def test(args, model, Y, epoch, data_path, fold, gpu, version, code_inds, dicts,
         tokenizer = BertTokenizer.from_pretrained(args.bert_dir)
     else:
         tokenizer = None
-    gen = datasets.data_generator(instances, args, tokenizer, filename, dicts, 1, num_labels, version=version, desc_embed=desc_embed)
-    #for batch_idx, tup in tqdm(enumerate(gen)):
-    for batch_idx, tup in enumerate(gen):
-        with torch.no_grad():
+    # gen = datasets.data_generator(instances, args, tokenizer, filename, dicts, 1, num_labels, version=version, desc_embed=desc_embed)
+    # for batch_idx, tup in enumerate(gen):
+    #     with torch.no_grad():
+    #         data, target, hadm_ids, _, descs = tup
 
-            data, target, hadm_ids, _, descs = tup
+    # loader
+    data_iter = iter(data_loader)
+    num_iter = len(data_loader)
+    for i in range(num_iter):
+        with torch.no_grad():
+            data, target, hadm_ids, _, descs = next(data_iter)
             if args.model.find("bert") != -1:
                 word, mask, segment, batch_size, chunk_num = data
                 data, target = (torch.LongTensor(word), torch.LongTensor(mask), torch.LongTensor(segment), batch_size,
