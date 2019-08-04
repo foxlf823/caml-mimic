@@ -38,21 +38,26 @@ def pick_model(args, dicts):
     elif args.model == "logreg":
         model = models.BOWPool(Y, args.embed_file, args.lmbda, args.gpu, dicts, args.pool, args.embed_size, args.dropout, args.code_emb)
 
-    elif args.model == 'bert_conv_attn':
+    elif args.model == 'bert_conv':
         filter_size = int(args.filter_size)
-        model = models.Bert_ConvAttn(Y, args.embed_file, filter_size, args.num_filter_maps, args.lmbda, args.gpu, dicts,
+        model = models.Bert_Conv(Y, args.embed_file, filter_size, args.num_filter_maps, args.lmbda, args.gpu, dicts,
                                      args.bert_dir,
                                      embed_size=args.embed_size, dropout=args.dropout, code_emb=args.code_emb)
 
-    elif args.model == 'bert':
+    elif args.model == 'bert_pooling':
         filter_size = int(args.filter_size)
-        model = models.Bert(Y, args.embed_file, filter_size, args.num_filter_maps, args.lmbda, args.gpu, dicts,
+        model = models.Bert_Pooling(Y, args.embed_file, filter_size, args.num_filter_maps, args.lmbda, args.gpu, dicts,
                                      args.bert_dir,
                                      embed_size=args.embed_size, dropout=args.dropout, code_emb=args.code_emb)
     elif args.model == 'multi_conv_attn':
         filter_size = int(args.filter_size)
         model = models.MultiConvAttnPool(args, Y, args.embed_file, filter_size, args.num_filter_maps, args.lmbda, args.gpu, dicts,
                                          args.conv_layer, args.use_res,
+                                    embed_size=args.embed_size, dropout=args.dropout, code_emb=args.code_emb)
+
+    elif args.model == 'conv_attn_lco':
+        filter_size = int(args.filter_size)
+        model = models.ConvAttnPool_lco(args, Y, args.embed_file, filter_size, args.num_filter_maps, args.lmbda, args.gpu, dicts,
                                     embed_size=args.embed_size, dropout=args.dropout, code_emb=args.code_emb)
 
     if args.test_model:

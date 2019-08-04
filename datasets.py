@@ -339,7 +339,44 @@ def load_lookups(args, desc_embed=False):
         dv_dict = None
 
     dicts = {'ind2w': ind2w, 'w2ind': w2ind, 'ind2c': ind2c, 'c2ind': c2ind, 'desc': desc_dict, 'dv': dv_dict}
+
+    if args.model.find('lco') != -1:
+        label_matrix = build_concurr_matrix(args, c2ind, ind2c)
+        dicts['label_matrix'] = label_matrix
+
     return dicts
+
+def build_concurr_matrix(args, c2ind, ind2c):
+
+    if args.version == 'mimic3':
+        label_matrix = np.zeros((len(c2ind), len(c2ind)), dtype=np.float32)
+
+        with open(args.data_path, 'r') as f:
+            lr = csv.reader(f)
+            next(lr)
+            for row in lr:
+                codes = row[3].split(';')
+                for i, code_i in enumerate(codes):
+
+                    j = 0
+                    while j < i:
+                        code_j = codes[j]
+                        code_i_idx = c2ind[code_i]
+                        code_j_idx = c2ind[code_j]
+                        label_matrix[code_i_idx,code_j_idx] = label_matrix[code_i_idx,code_j_idx] + 1
+                        # symmetric
+                        label_matrix[code_j_idx, code_i_idx] = label_matrix[code_j_idx, code_i_idx] + 1
+
+                        j += 1
+
+        label_matrix += np.identity(label_matrix.shape[0])
+
+    else:
+        raise RuntimeError("not support {}".format(args.version))
+
+
+
+    return label_matrix
 
 def load_full_codes(train_path, version='mimic3'):
     """

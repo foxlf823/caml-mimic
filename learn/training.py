@@ -24,7 +24,7 @@ import interpret
 import persistence
 import learn.models as models
 import learn.tools as tools
-from pytorch_pretrained_bert import BertTokenizer
+from pytorch_pretrained_bert import BertTokenizer, BertAdam
 
 from torch.utils.data import DataLoader, Dataset
 
@@ -47,7 +47,7 @@ def init(args):
     dicts = datasets.load_lookups(args, desc_embed=desc_embed)
 
     model = tools.pick_model(args, dicts)
-    print(model)
+    # print(model)
 
     if not args.test_model:
         optimizer = optim.Adam(model.parameters(), weight_decay=args.weight_decay, lr=args.lr)
@@ -68,12 +68,14 @@ def pad_desc_vecs(desc_vecs):
         pad_vecs.append(vec)
     return pad_vecs
 
-import nltk
+from pytorch_pretrained_bert import BertTokenizer
+
 def prepare_instance(dicts, filename, args):
     ind2w, w2ind, ind2c, c2ind, dv_dict = dicts['ind2w'], dicts['w2ind'], dicts['ind2c'], dicts['c2ind'], dicts['dv']
     instances = []
     num_labels = len(dicts['ind2c'])
-    desc_embed = args.lmbda > 0
+
+    wp_tokenizer = BertTokenizer.from_pretrained(args.bert_dir, do_lower_case=True)
 
     with open(filename, 'r') as infile:
         r = csv.reader(infile)
@@ -84,11 +86,11 @@ def prepare_instance(dicts, filename, args):
 
             text = row[2]
             hadm_id = int(row[1])
-            length = int(row[4])
+
             cur_code_set = set()
             labels_idx = np.zeros(num_labels)
             labelled = False
-            desc_vecs = []
+
             for l in row[3].split(';'):
                 if l in c2ind.keys():
                     code = int(c2ind[l])
@@ -98,36 +100,33 @@ def prepare_instance(dicts, filename, args):
             if not labelled:
                 continue
 
-            if desc_embed:
-                for code in cur_code_set:
-                    l = ind2c[code]
-                    if l in dv_dict.keys():
-                        # need to copy or description padding will get screwed up
-                        desc_vecs.append(dv_dict[l][:])
-                    else:
-                        desc_vecs.append([len(w2ind) + 1])
+            tokens = text.split()
+            sentences = []
+            sentences_id = []
+            sentence = []
+            masks = []
+            segments = []
+            for token in tokens:
+                if token == '[CLS]':
+                    sentence.append('[CLS]')
+                elif token == '[SEP]':
+                    if len(sentence) > args.bert_chunk_len:
+                        sentence = sentence[:args.bert_chunk_len]
+                    sentence.append('[SEP]')
+                    sentences.append(sentence)
+                    sentence_id = wp_tokenizer.convert_tokens_to_ids(sentence)
+                    sentences_id.append(sentence_id)
+                    segment = [0] * len(sentence)
+                    segments.append(segment)
+                    mask = [1] * len(sentence)
+                    masks.append(mask)
+                    sentence = []
+                else:
+                    wps = wp_tokenizer.tokenize(token)
+                    sentence.extend(wps)
 
-            original_text = text.split()
-            text = [int(w2ind[w]) if w in w2ind else len(w2ind) + 1 for w in original_text]
-            if args.use_pos:
-                pos_tags = nltk.pos_tag(original_text)
-                # salience
-                #pos_tags = [1 if pos_tag in args.use_pos else 0 for _, pos_tag in pos_tags]
-                pos_tags = [1 if pos_tag in args.use_pos else 2 for _, pos_tag in pos_tags]
-            # truncate long documents
-            if len(text) > MAX_LENGTH:
-                text = text[:MAX_LENGTH]
-                if args.use_pos:
-                    pos_tags = pos_tags[:MAX_LENGTH]
-
-
-            dict_instance = {'row': row, 'word': text, 'label':labels_idx, 'hadm_id':hadm_id,
-                             'cur_code_set':cur_code_set}
-            if args.use_pos:
-                dict_instance['pos'] = pos_tags
-
-            if desc_embed:
-                dict_instance['desc'] = pad_desc_vecs(desc_vecs)
+            dict_instance = {'label':labels_idx, 'hadm_id':hadm_id, 'cur_code_set':cur_code_set, 'sentences':sentences,
+                             "sentences_id":sentences_id, "segments":segments, "masks":masks}
 
             instances.append(dict_instance)
 
@@ -154,50 +153,22 @@ def pad_sequence(x, max_len):
     return padded_x
 
 def my_collate(x):
-    if 'pos' in x[0]:
-        use_pos = True
-    else:
-        use_pos = False
-    docs = [x_['word'] for x_ in x]
-    if use_pos:
-        docs_pos = [x_['pos'] for x_ in x]
+
+    sentences_id = x[0]["sentences_id"]
+    segments = x[0]["segments"]
+    masks = x[0]['masks']
+
     labels = [x_['label'] for x_ in x]
-    lengths = [len(x_['word']) for x_ in x]
+
+    lengths = [len(sentence_id) for sentence_id in sentences_id]
     length = max(lengths)
 
+    inputs_id = pad_sequence(sentences_id, length)
+    segments = pad_sequence(segments, length)
+    masks = pad_sequence(masks, length)
 
-    padded_docs = pad_sequence(docs, length)
-    if use_pos:
-        padded_doc_pos = pad_sequence(docs_pos, length)
-    # for i, doc in enumerate(docs):
-    #     if len(doc) < length:
-    #         doc.extend([0] * (length - len(doc)))
-    #     padded_docs.append(doc)
-    #
-    #     if use_pos:
-    #         doc_pos = docs_pos[i]
-    #         if len(doc_pos) < length:
-    #             doc_pos.extend([0] * (length - len(doc_pos)))
-    #         padded_doc_pos.append(doc_pos)
+    return inputs_id, segments, masks, labels
 
-
-    hadm_ids = [x_['hadm_id'] for x_ in x]
-    code_set = set()
-    for x_ in x:
-        code_set = code_set.union(x_['cur_code_set'])
-
-    if 'desc' in x[0]:
-        descs = [x_['desc'] for x_ in x]
-    else:
-        descs = []
-
-
-    if use_pos:
-        return (padded_docs, padded_doc_pos), np.array(labels), np.array(hadm_ids), code_set, \
-               np.array(descs)
-    else:
-        return padded_docs, np.array(labels), np.array(hadm_ids), code_set, \
-               np.array(descs)
 
 def train_epochs(args, model, optimizer, params, dicts):
     """
@@ -220,9 +191,31 @@ def train_epochs(args, model, optimizer, params, dicts):
     # train_instances = dev_instances
     # test_instances = dev_instances
 
-    train_loader = DataLoader(MyDataset(train_instances), args.batch_size, shuffle=False, collate_fn=my_collate)
+    train_loader = DataLoader(MyDataset(train_instances), args.batch_size, shuffle=True, collate_fn=my_collate)
     dev_loader = DataLoader(MyDataset(dev_instances), 1, shuffle=False, collate_fn=my_collate)
     test_loader = DataLoader(MyDataset(test_instances), 1, shuffle=False, collate_fn=my_collate)
+
+    if not args.test_model and args.model.find("bert") != -1:
+        param_optimizer = list(model.named_parameters())
+        param_optimizer = [n for n in param_optimizer if 'pooler' not in n[0]]
+        no_decay = ['bias', 'LayerNorm.bias', 'LayerNorm.weight']
+        optimizer_grouped_parameters = [
+            {'params': [p for n, p in param_optimizer if not any(nd in n for nd in no_decay)],
+             'weight_decay': 0.01},
+            {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
+        ]
+
+        # batch size is 1, one doc one step
+        num_train_optimization_steps = int(len(train_instances)) * args.n_epochs
+
+        optimizer = BertAdam(optimizer_grouped_parameters,
+                             lr=args.lr,
+                             warmup=0.1,
+                             t_total=num_train_optimization_steps)
+
+
+        print("Warmup steps = %d, Num steps = %d" %
+              (int(num_train_optimization_steps * 0.1), num_train_optimization_steps))
 
     #train for n_epochs unless criterion metric does not improve for [patience] epochs
     for epoch in range(args.n_epochs):
@@ -332,74 +325,32 @@ def train(args, model, optimizer, Y, epoch, batch_size, data_path, gpu, version,
         output: losses for each example for this iteration
     """
     print("EPOCH %d" % epoch)
-    num_labels = len(dicts['ind2c'])
 
     losses = []
-    #how often to print some info to stdout
-    print_every = 25
 
-    ind2w, w2ind, ind2c, c2ind = dicts['ind2w'], dicts['w2ind'], dicts['ind2c'], dicts['c2ind']
-    unseen_code_inds = set(ind2c.keys())
-    desc_embed = model.lmbda > 0
 
     model.train()
-    if args.model.find("bert") != -1:
-        tokenizer = BertTokenizer.from_pretrained(args.bert_dir)
-    else:
-        tokenizer = None
-    # gen = datasets.data_generator(instances, args, tokenizer, data_path, dicts, batch_size, num_labels, version=version, desc_embed=desc_embed)
-    # for batch_idx, tup in enumerate(gen):
-    #     data, target, _, code_set, descs = tup
 
     # loader
     data_iter = iter(data_loader)
     num_iter = len(data_loader)
     for i in range(num_iter):
-        data, target, _, code_set, descs = next(data_iter)
+        inputs_id, segments, masks, labels = next(data_iter)
 
-        if args.model.find("bert") != -1:
-            word, mask, segment, batch_size, chunk_num = data
-            data, target = (torch.LongTensor(word), torch.LongTensor(mask), torch.LongTensor(segment), batch_size, chunk_num), torch.FloatTensor(target)
-        else:
-            if args.use_pos:
-                word, pos = data
-                data, target = (torch.LongTensor(word), torch.LongTensor(pos)), torch.FloatTensor(target)
-            else:
-                data, target = torch.LongTensor(data), torch.FloatTensor(target)
-        unseen_code_inds = unseen_code_inds.difference(code_set)
+        inputs_id, segments, masks, labels = torch.LongTensor(inputs_id), torch.LongTensor(segments), torch.LongTensor(masks), torch.FloatTensor(labels)
+
         if gpu >= 0:
-            if args.model.find("bert") != -1:
-                word, mask, segment, batch_size, chunk_num = data
-                data = (word.cuda(gpu), mask.cuda(gpu), segment.cuda(gpu), batch_size, chunk_num)
-                target = target.cuda(gpu)
-            else:
-                if args.use_pos:
-                    word, pos = data
-                    data = (word.cuda(gpu), pos.cuda(gpu))
-                    target = target.cuda(gpu)
-                else:
-                    data = data.cuda(gpu)
-                    target = target.cuda(gpu)
+            inputs_id, segments, masks, labels = inputs_id.cuda(gpu), segments.cuda(gpu), masks.cuda(gpu), labels.cuda(gpu)
+
+        output, loss = model(inputs_id, segments, masks, labels)
+
         optimizer.zero_grad()
-
-        if desc_embed:
-            desc_data = descs
-        else:
-            desc_data = None
-
-        output, loss, _ = model(data, target, desc_data=desc_data)
-
         loss.backward()
         optimizer.step()
 
-        #losses.append(loss.data[0])
         losses.append(loss.item())
 
-        if not quiet and batch_idx % print_every == 0:
-            #print the average loss of the last 10 batches
-            print("Train epoch: {} [batch #{}, batch_size {}, seq length {}]\tLoss: {:.6f}".format(
-                epoch, batch_idx, data.size()[0], data.size()[1], np.mean(losses[-10:])))
-    return losses, unseen_code_inds
+    return losses, None
 
 def unseen_code_vecs(model, code_inds, dicts, gpu):
     """
@@ -432,79 +383,36 @@ def test(args, model, Y, epoch, data_path, fold, gpu, version, code_inds, dicts,
     y, yhat, yhat_raw, hids, losses = [], [], [], [], []
     ind2w, w2ind, ind2c, c2ind = dicts['ind2w'], dicts['w2ind'], dicts['ind2c'], dicts['c2ind']
 
-    desc_embed = model.lmbda > 0
-    if desc_embed and len(code_inds) > 0:
-        unseen_code_vecs(model, code_inds, dicts, gpu)
-
     model.eval()
-    if args.model.find("bert") != -1:
-        tokenizer = BertTokenizer.from_pretrained(args.bert_dir)
-    else:
-        tokenizer = None
-    # gen = datasets.data_generator(instances, args, tokenizer, filename, dicts, 1, num_labels, version=version, desc_embed=desc_embed)
-    # for batch_idx, tup in enumerate(gen):
-    #     with torch.no_grad():
-    #         data, target, hadm_ids, _, descs = tup
 
     # loader
     data_iter = iter(data_loader)
     num_iter = len(data_loader)
     for i in range(num_iter):
         with torch.no_grad():
-            data, target, hadm_ids, _, descs = next(data_iter)
-            if args.model.find("bert") != -1:
-                word, mask, segment, batch_size, chunk_num = data
-                data, target = (torch.LongTensor(word), torch.LongTensor(mask), torch.LongTensor(segment), batch_size,
-                            chunk_num), torch.FloatTensor(target)
-            else:
-                if args.use_pos:
-                    word, pos = data
-                    data, target = (torch.LongTensor(word), torch.LongTensor(pos)), torch.FloatTensor(target)
-                else:
-                    data, target = torch.LongTensor(data), torch.FloatTensor(target)
+            inputs_id, segments, masks, labels = next(data_iter)
+
+            inputs_id, segments, masks, labels = torch.LongTensor(inputs_id), torch.LongTensor(
+                segments), torch.LongTensor(masks), torch.FloatTensor(labels)
 
             if gpu >= 0:
-                if args.model.find("bert") != -1:
-                    word, mask, segment, batch_size, chunk_num = data
-                    data = (word.cuda(gpu), mask.cuda(gpu), segment.cuda(gpu), batch_size, chunk_num)
-                    target = target.cuda(gpu)
-                else:
-                    if args.use_pos:
-                        word, pos = data
-                        data = (word.cuda(gpu), pos.cuda(gpu))
-                        target = target.cuda(gpu)
-                    else:
-                        data = data.cuda(gpu)
-                        target = target.cuda(gpu)
+                inputs_id, segments, masks, labels = inputs_id.cuda(gpu), segments.cuda(gpu), masks.cuda(
+                    gpu), labels.cuda(gpu)
 
-            model.zero_grad()
+            output, loss = model(inputs_id, segments, masks, labels)
 
-            if desc_embed:
-                desc_data = descs
-            else:
-                desc_data = None
-
-            #get an attention sample for 2% of batches
-            get_attn = samples and (np.random.rand() < 0.02 or (fold == 'test' and testing))
-            output, loss, alpha = model(data, target, desc_data=desc_data, get_attention=get_attn)
-
-            # feili
-            # output = F.sigmoid(output)
             output = torch.sigmoid(output)
             output = output.data.cpu().numpy()
-            # feili
-            # losses.append(loss.data[0])
+
             losses.append(loss.item())
-            target_data = target.data.cpu().numpy()
-            if get_attn and samples:
-                interpret.save_samples(data, output, target_data, alpha, window_size, epoch, tp_file, fp_file, dicts=dicts)
+            target_data = labels.data.cpu().numpy()
 
             #save predictions, target, hadm ids
             yhat_raw.append(output)
             output = np.round(output)
             y.append(target_data)
             yhat.append(output)
-            hids.extend(hadm_ids)
+
 
     #close files if needed
     if samples:
@@ -516,7 +424,7 @@ def test(args, model, Y, epoch, data_path, fold, gpu, version, code_inds, dicts,
     yhat_raw = np.concatenate(yhat_raw, axis=0)
 
     #write the predictions
-    preds_file = persistence.write_preds(yhat, model_dir, hids, fold, ind2c, yhat_raw)
+    # preds_file = persistence.write_preds(yhat, model_dir, hids, fold, ind2c, yhat_raw)
     #get metrics
     k = 5 if num_labels == 50 else [8,15]
     metrics = evaluation.all_metrics(yhat, y, k=k, yhat_raw=yhat_raw)
@@ -531,7 +439,8 @@ if __name__ == "__main__":
     parser.add_argument("vocab", type=str, help="path to a file holding vocab word list for discretizing words")
     parser.add_argument("Y", type=str, help="size of label space")
     parser.add_argument("model", type=str, choices=["cnn_vanilla", "rnn", "conv_attn", "multi_conv_attn", "logreg", "saved",
-                                                    "conv_attn_ldep", 'bert_conv_attn', 'bert', 'resnet_attn'], help="model")
+                                                    "conv_attn_ldep", 'bert_conv_attn', 'bert_conv', 'resnet_attn',
+                                                    'conv_attn_lco','bert_pooling'], help="model")
     parser.add_argument("n_epochs", type=int, help="number of epochs to train")
     parser.add_argument("--embed-file", type=str, required=False, dest="embed_file",
                         help="path to a file holding pre-trained embeddings")
@@ -586,6 +495,7 @@ if __name__ == "__main__":
     parser.add_argument("--use_ext_emb", dest="use_ext_emb", action="store_const", const=True, default=False)
     parser.add_argument("--use_pos", dest="use_pos", type=str, default=None, help='NN,VBP')
     parser.add_argument('--random_seed', type=int, default=1)
+
     args = parser.parse_args()
     command = ' '.join(['python'] + sys.argv)
     args.command = command
