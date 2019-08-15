@@ -8,7 +8,7 @@ import torch.nn.functional as F
 
 import csv
 import argparse
-import os 
+import os
 import numpy as np
 import operator
 import random
@@ -47,12 +47,15 @@ def init(args):
     dicts = datasets.load_lookups(args, desc_embed=desc_embed)
 
     model = tools.pick_model(args, dicts)
-    # print(model)
+    print(model)
 
     if not args.test_model:
         optimizer = optim.Adam(model.parameters(), weight_decay=args.weight_decay, lr=args.lr)
     else:
         optimizer = None
+
+    if args.tune_wordemb == False:
+        model.freeze_net()
 
     params = tools.make_param_dict(args)
     
@@ -76,6 +79,8 @@ def prepare_instance(dicts, filename, args):
     num_labels = len(dicts['ind2c'])
 
     wp_tokenizer = BertTokenizer.from_pretrained(args.bert_dir, do_lower_case=True)
+
+    max_sent_num = -1
 
     with open(filename, 'r') as infile:
         r = csv.reader(infile)
@@ -125,10 +130,163 @@ def prepare_instance(dicts, filename, args):
                     wps = wp_tokenizer.tokenize(token)
                     sentence.extend(wps)
 
+            if len(sentences) > args.max_sent_num:
+                sentences = sentences[:args.max_sent_num]
+                sentences_id = sentences_id[:args.max_sent_num]
+                segments = segments[:args.max_sent_num]
+                masks = masks[:args.max_sent_num]
+
             dict_instance = {'label':labels_idx, 'hadm_id':hadm_id, 'cur_code_set':cur_code_set, 'sentences':sentences,
                              "sentences_id":sentences_id, "segments":segments, "masks":masks}
 
+            if len(sentences) > max_sent_num:
+                max_sent_num = len(sentences)
+
             instances.append(dict_instance)
+
+    print("max sent num {}".format(max_sent_num))
+
+    return instances
+
+
+def prepare_instance1(dicts, filename, args):
+    ind2w, w2ind, ind2c, c2ind, dv_dict = dicts['ind2w'], dicts['w2ind'], dicts['ind2c'], dicts['c2ind'], dicts['dv']
+    instances = []
+    num_labels = len(dicts['ind2c'])
+
+    wp_tokenizer = BertTokenizer.from_pretrained(args.bert_dir, do_lower_case=True)
+
+    with open(filename, 'r') as infile:
+        r = csv.reader(infile)
+        #header
+        next(r)
+
+        for row in r:
+
+            text = row[2]
+            hadm_id = int(row[1])
+
+            cur_code_set = set()
+            labels_idx = np.zeros(num_labels)
+            labelled = False
+
+            for l in row[3].split(';'):
+                if l in c2ind.keys():
+                    code = int(c2ind[l])
+                    labels_idx[code] = 1
+                    cur_code_set.add(code)
+                    labelled = True
+            if not labelled:
+                continue
+
+            tokens_ = text.split()
+            tokens = []
+            for token in tokens_:
+                if token == '[CLS]' or token == '[SEP]':
+                    continue
+                wps = wp_tokenizer.tokenize(token)
+                tokens.extend(wps)
+
+            tokens_max_len = args.bert_chunk_len-2 # for CLS SEP
+            if len(tokens) > tokens_max_len:
+                tokens = tokens[:tokens_max_len]
+
+            tokens.insert(0, '[CLS]')
+            tokens.append('[SEP]')
+
+            tokens_id = wp_tokenizer.convert_tokens_to_ids(tokens)
+            masks = [1] * len(tokens)
+            segments = [0] * len(tokens)
+
+            dict_instance = {'label':labels_idx, 'hadm_id':hadm_id, 'cur_code_set':cur_code_set, 'tokens':tokens,
+                             "tokens_id":tokens_id, "segments":segments, "masks":masks}
+
+            instances.append(dict_instance)
+
+    return instances
+
+from collections import Counter
+import math
+def prepare_instance2(dicts, filename, args):
+    ind2w, w2ind, ind2c, c2ind, dv_dict = dicts['ind2w'], dicts['w2ind'], dicts['ind2c'], dicts['c2ind'], dicts['dv']
+    instances = []
+    num_labels = len(dicts['ind2c'])
+
+    document_num = 0
+    idf = Counter() # key: ind, value: idf
+
+    with open(filename, 'r') as infile:
+        r = csv.reader(infile)
+        #header
+        next(r)
+
+        for row in r:
+
+            tf = Counter() # key: ind, value: tf
+
+            text = row[2]
+            hadm_id = int(row[1])
+
+            cur_code_set = set()
+            labels_idx = np.zeros(num_labels)
+            labelled = False
+
+            for l in row[3].split(';'):
+                if l in c2ind.keys():
+                    code = int(c2ind[l])
+                    labels_idx[code] = 1
+                    cur_code_set.add(code)
+                    labelled = True
+            if not labelled:
+                continue
+
+            tokens_ = text.split()
+            tokens = []
+            tokens_id = []
+            for token in tokens_:
+                if token == '[CLS]' or token == '[SEP]':
+                    continue
+                tokens.append(token)
+                token_id = w2ind[token] if token in w2ind else len(w2ind) + 1
+                tokens_id.append(token_id)
+
+            if len(tokens) > MAX_LENGTH:
+                tokens = tokens[:MAX_LENGTH]
+                tokens_id = tokens_id[:MAX_LENGTH]
+
+            for token_id in tokens_id:
+                tf[token_id] += 1
+
+            doc_token_num = len(tokens)
+            tfidf = [0] * (len(w2ind) + 2)  # index: word id, value: tfidf, +2 due to "pad is not in w2ind" and "unk"
+            for token_id, tf_ in tf.items():
+                tf[token_id] = tf_*1.0/doc_token_num
+                tfidf[token_id] = tf[token_id]
+                idf[token_id] += 1
+
+            document_num += 1
+
+            if args.use_tfidf:
+                dict_instance = {'label':labels_idx, 'hadm_id':hadm_id, 'cur_code_set':cur_code_set, 'tokens':tokens,
+                             "tokens_id":tokens_id, 'tfidf': tfidf}
+            else:
+                dict_instance = {'label': labels_idx, 'hadm_id': hadm_id, 'cur_code_set': cur_code_set,
+                                 'tokens': tokens,
+                                 "tokens_id": tokens_id}
+
+            instances.append(dict_instance)
+
+    if args.use_tfidf:
+        # update the idf for all the words
+        for ind, idf_ in idf.items():
+            idf[ind] = math.log(document_num*1.0/idf_+1)
+
+        for instance in instances:
+            tfidf = instance['tfidf']
+            for ind, idf_ in idf.items():
+                tfidf[ind] = tfidf[ind]*idf_
+            tfidf[-1] = 0 # unk should not be considered
+
 
     return instances
 
@@ -144,31 +302,127 @@ class MyDataset(Dataset):
     def __getitem__(self, idx):
         return self.X[idx]
 
-def pad_sequence(x, max_len):
+def pad_sequence(x, max_len, type=np.int):
 
-    padded_x = np.zeros((len(x), max_len), dtype=np.int)
+    padded_x = np.zeros((len(x), max_len), dtype=type)
     for i, row in enumerate(x):
         padded_x[i][:len(row)] = row
 
     return padded_x
 
+def pad_sequence_3d(x, seq_lengths, len1d, len2d):
+
+    padded_x = np.zeros((len(x), len1d, len2d), dtype=np.int)
+
+    for idx, (seq, seqlen) in enumerate(zip(x, seq_lengths)):
+        for idy, (word, wordlen) in enumerate(zip(seq, seqlen)):
+            padded_x[idx, idy, :wordlen] = word
+
+    return padded_x
+
 def my_collate(x):
 
-    sentences_id = x[0]["sentences_id"]
-    segments = x[0]["segments"]
-    masks = x[0]['masks']
+    words = [x_['sentences_id'] for x_ in x]
+    segments = [x_['segments'] for x_ in x]
+    masks = [x_['masks'] for x_ in x]
+
+    sent_num = [len(x_['sentences_id']) for x_ in x]
+    max_sent_num = max(sent_num)
+
+    pad_words = [words[idx] + [[0]] * (max_sent_num - len(words[idx])) for idx in range(len(words))]
+    pad_segments = [segments[idx] + [[0]] * (max_sent_num - len(segments[idx])) for idx in range(len(segments))]
+    pad_masks = [masks[idx] + [[0]] * (max_sent_num - len(masks[idx])) for idx in range(len(masks))]
+
+    sent_len = [list(map(len, pad_word)) for pad_word in pad_words]
+    max_sent_len = max(list(map(max, sent_len)))
+
+    inputs_id = pad_sequence_3d(pad_words, sent_len, max_sent_num, max_sent_len)
+    segments = pad_sequence_3d(pad_segments, sent_len, max_sent_num, max_sent_len)
+    masks = pad_sequence_3d(pad_masks, sent_len, max_sent_num, max_sent_len)
 
     labels = [x_['label'] for x_ in x]
 
-    lengths = [len(sentence_id) for sentence_id in sentences_id]
-    length = max(lengths)
+    pad_sent = [[1]*sent_num_+ [0]* (max_sent_num - sent_num_) for sent_num_ in sent_num]
+    pad_sent_position = [ list(range(1, sent_num_+1)) + [0]*(max_sent_num - sent_num_) for sent_num_ in sent_num]
 
-    inputs_id = pad_sequence(sentences_id, length)
-    segments = pad_sequence(segments, length)
-    masks = pad_sequence(masks, length)
+    # sentences_id = x[0]["sentences_id"]
+    # segments = x[0]["segments"]
+    # masks = x[0]['masks']
+    #
+    # labels = [x_['label'] for x_ in x]
+    #
+    # lengths = [len(sentence_id) for sentence_id in sentences_id]
+    # length = max(lengths)
+    #
+    # inputs_id = pad_sequence(sentences_id, length)
+    # segments = pad_sequence(segments, length)
+    # masks = pad_sequence(masks, length)
+
+    return inputs_id, segments, masks, labels, sent_num, pad_sent, pad_sent_position
+
+def my_collate1(x):
+
+    words = [x_['tokens_id'] for x_ in x]
+    segments = [x_['segments'] for x_ in x]
+    masks = [x_['masks'] for x_ in x]
+
+    seq_len = [len(w) for w in words]
+    max_seq_len = max(seq_len)
+
+    inputs_id = pad_sequence(words, max_seq_len)
+    segments = pad_sequence(segments, max_seq_len)
+    masks = pad_sequence(masks, max_seq_len)
+
+    labels = [x_['label'] for x_ in x]
 
     return inputs_id, segments, masks, labels
 
+def my_collate2(x):
+
+    words = [x_['tokens_id'] for x_ in x]
+
+    seq_len = [len(w) for w in words]
+    max_seq_len = max(seq_len)
+
+    inputs_id = pad_sequence(words, max_seq_len)
+
+    labels = [x_['label'] for x_ in x]
+
+    # if 'tfidf' in x[0]:
+    #     tfidf = [x_['tfidf'] for x_ in x]
+    #     tfidf = pad_sequence(tfidf, len(tfidf[0]), np.float32)
+    # else:
+    #     tfidf = None
+
+    positions = [list(range(1, len+1)) for len in seq_len]
+    positions = pad_sequence(positions, max_seq_len)
+
+    # text_inputs = [x_['tokens'] for x_ in x]
+    text_inputs = [x_['tokens']+ ['<pad>']* (max_seq_len - len(x_['tokens'])) for x_ in x]
+
+    return inputs_id, labels, positions, text_inputs
+
+def stat_label_distribution(instances):
+    ct = Counter()
+    for instance in instances:
+        labels = instance['label']
+        for idx, value in enumerate(labels.flat):
+            if value == 1:
+                ct[idx] += 1
+
+    print(ct)
+    return ct
+
+def compute_class_weight(labels_dict,mu=0.15):
+    total = np.sum(list(labels_dict.values()))
+    keys = labels_dict.keys()
+    class_weight = dict()
+
+    for key in keys:
+        score = math.log(mu * total / float(labels_dict[key]))
+        class_weight[key] = score if score > 1.0 else 1.0
+
+    return class_weight
 
 def train_epochs(args, model, optimizer, params, dicts):
     """
@@ -181,19 +435,27 @@ def train_epochs(args, model, optimizer, params, dicts):
     test_only = args.test_model is not None
     evaluate = args.test_model is not None
 
+
     # prepare instance before epoch since pos tagging is too slow
-    train_instances = prepare_instance(dicts, args.data_path, args)
+    train_instances = prepare_instance2(dicts, args.data_path, args)
     print("train_instances {}".format(len(train_instances)))
-    dev_instances = prepare_instance(dicts, args.data_path.replace('train','dev'), args)
+    dev_instances = prepare_instance2(dicts, args.data_path.replace('train','dev'), args)
     print("dev_instances {}".format(len(dev_instances)))
-    test_instances = prepare_instance(dicts, args.data_path.replace('train','test'), args)
+    test_instances = prepare_instance2(dicts, args.data_path.replace('train','test'), args)
     print("test_instances {}".format(len(test_instances)))
     # train_instances = dev_instances
     # test_instances = dev_instances
 
-    train_loader = DataLoader(MyDataset(train_instances), args.batch_size, shuffle=True, collate_fn=my_collate)
-    dev_loader = DataLoader(MyDataset(dev_instances), 1, shuffle=False, collate_fn=my_collate)
-    test_loader = DataLoader(MyDataset(test_instances), 1, shuffle=False, collate_fn=my_collate)
+    if args.weighted_loss:
+        label_dist = stat_label_distribution(train_instances)
+        label_weight = compute_class_weight(label_dist, mu=args.mu)
+        print(label_weight)
+        model.set_weighted_loss(label_weight, len(dicts['ind2c']))
+
+
+    train_loader = DataLoader(MyDataset(train_instances), args.batch_size, shuffle=True, collate_fn=my_collate2)
+    dev_loader = DataLoader(MyDataset(dev_instances), 1, shuffle=False, collate_fn=my_collate2)
+    test_loader = DataLoader(MyDataset(test_instances), 1, shuffle=False, collate_fn=my_collate2)
 
     if not args.test_model and args.model.find("bert") != -1:
         param_optimizer = list(model.named_parameters())
@@ -205,17 +467,14 @@ def train_epochs(args, model, optimizer, params, dicts):
             {'params': [p for n, p in param_optimizer if any(nd in n for nd in no_decay)], 'weight_decay': 0.0}
         ]
 
-        # batch size is 1, one doc one step
-        num_train_optimization_steps = int(len(train_instances)) * args.n_epochs
+        num_train_optimization_steps = int(
+            len(train_instances) / args.batch_size + 1) * args.n_epochs
 
         optimizer = BertAdam(optimizer_grouped_parameters,
                              lr=args.lr,
                              warmup=0.1,
                              t_total=num_train_optimization_steps)
 
-
-        print("Warmup steps = %d, Num steps = %d" %
-              (int(num_train_optimization_steps * 0.1), num_train_optimization_steps))
 
     #train for n_epochs unless criterion metric does not improve for [patience] epochs
     for epoch in range(args.n_epochs):
@@ -281,21 +540,23 @@ def one_epoch(args, model, optimizer, Y, epoch, n_epochs, batch_size, data_path,
         print("epoch finish in %.2fs, loss: %.4f" % (epoch_finish-epoch_start, loss))
     else:
         loss = np.nan
-        if model.lmbda > 0:
-            #still need to get unseen code inds
-            print("getting set of codes not in training set")
-            c2ind = dicts['c2ind']
-            unseen_code_inds = set(dicts['ind2c'].keys())
-            num_labels = len(dicts['ind2c'])
-            with open(data_path, 'r') as f:
-                r = csv.reader(f)
-                #header
-                next(r)
-                for row in r:
-                    unseen_code_inds = unseen_code_inds.difference(set([c2ind[c] for c in row[3].split(';') if c != '']))
-            print("num codes not in train set: %d" % len(unseen_code_inds))
-        else:
-            unseen_code_inds = set()
+        # if model.lmbda > 0:
+        #     #still need to get unseen code inds
+        #     print("getting set of codes not in training set")
+        #     c2ind = dicts['c2ind']
+        #     unseen_code_inds = set(dicts['ind2c'].keys())
+        #     num_labels = len(dicts['ind2c'])
+        #     with open(data_path, 'r') as f:
+        #         r = csv.reader(f)
+        #         #header
+        #         next(r)
+        #         for row in r:
+        #             unseen_code_inds = unseen_code_inds.difference(set([c2ind[c] for c in row[3].split(';') if c != '']))
+        #     print("num codes not in train set: %d" % len(unseen_code_inds))
+        # else:
+        #     unseen_code_inds = set()
+
+        unseen_code_inds = set()
 
     fold = 'test' if version == 'mimic2' else 'dev'
     if epoch == n_epochs - 1:
@@ -335,14 +596,39 @@ def train(args, model, optimizer, Y, epoch, batch_size, data_path, gpu, version,
     data_iter = iter(data_loader)
     num_iter = len(data_loader)
     for i in range(num_iter):
-        inputs_id, segments, masks, labels = next(data_iter)
+        # inputs_id, segments, masks, labels, sent_num, pad_sent, pad_sent_position = next(data_iter)
+        #
+        # inputs_id, segments, masks, labels, sent_num, pad_sent, pad_sent_position = torch.LongTensor(inputs_id), torch.LongTensor(segments), \
+        #                                      torch.LongTensor(masks), torch.FloatTensor(labels), torch.LongTensor(sent_num),\
+        #                                     torch.LongTensor(pad_sent), torch.LongTensor(pad_sent_position)
+        #
+        # if gpu >= 0:
+        #     inputs_id, segments, masks, labels, sent_num, pad_sent, pad_sent_position = inputs_id.cuda(gpu), segments.cuda(gpu), \
+        #                                          masks.cuda(gpu), labels.cuda(gpu), sent_num.cuda(gpu), \
+        #                                         pad_sent.cuda(gpu), pad_sent_position.cuda(gpu)
+        #
+        # output, loss = model(inputs_id, segments, masks, labels, sent_num, pad_sent, pad_sent_position)
 
-        inputs_id, segments, masks, labels = torch.LongTensor(inputs_id), torch.LongTensor(segments), torch.LongTensor(masks), torch.FloatTensor(labels)
+        # inputs_id, segments, masks, labels = next(data_iter)
+        #
+        # inputs_id, segments, masks, labels = torch.LongTensor(inputs_id), torch.LongTensor(segments), \
+        #                                      torch.LongTensor(masks), torch.FloatTensor(labels)
+        #
+        # if gpu >= 0:
+        #     inputs_id, segments, masks, labels = inputs_id.cuda(gpu), segments.cuda(gpu), \
+        #                                          masks.cuda(gpu), labels.cuda(gpu)
+        #
+        # output, loss = model(inputs_id, segments, masks, labels)
+
+        inputs_id, labels, positions, text_inputs = next(data_iter)
+
+        inputs_id, labels, positions, text_inputs = torch.LongTensor(inputs_id), torch.FloatTensor(labels), \
+                                                   torch.LongTensor(positions), text_inputs
 
         if gpu >= 0:
-            inputs_id, segments, masks, labels = inputs_id.cuda(gpu), segments.cuda(gpu), masks.cuda(gpu), labels.cuda(gpu)
+            inputs_id, labels, positions, text_inputs = inputs_id.cuda(gpu), labels.cuda(gpu), positions.cuda(gpu), text_inputs
 
-        output, loss = model(inputs_id, segments, masks, labels)
+        output, loss = model(inputs_id, labels, positions, text_inputs)
 
         optimizer.zero_grad()
         loss.backward()
@@ -390,16 +676,40 @@ def test(args, model, Y, epoch, data_path, fold, gpu, version, code_inds, dicts,
     num_iter = len(data_loader)
     for i in range(num_iter):
         with torch.no_grad():
-            inputs_id, segments, masks, labels = next(data_iter)
+            # inputs_id, segments, masks, labels, sent_num, pad_sent, pad_sent_position = next(data_iter)
+            #
+            # inputs_id, segments, masks, labels, sent_num, pad_sent, pad_sent_position = torch.LongTensor(inputs_id), torch.LongTensor(
+            #     segments), torch.LongTensor(masks), torch.FloatTensor(labels), torch.LongTensor(sent_num), \
+            #     torch.LongTensor(pad_sent), torch.LongTensor(pad_sent_position)
+            #
+            # if gpu >= 0:
+            #     inputs_id, segments, masks, labels, sent_num, pad_sent, pad_sent_position = inputs_id.cuda(gpu), segments.cuda(gpu), \
+            #                                          masks.cuda(gpu), labels.cuda(gpu), sent_num.cuda(gpu), \
+            #                                          pad_sent.cuda(gpu), pad_sent_position.cuda(gpu)
+            #
+            # output, loss = model(inputs_id, segments, masks, labels, sent_num, pad_sent, pad_sent_position)
 
-            inputs_id, segments, masks, labels = torch.LongTensor(inputs_id), torch.LongTensor(
-                segments), torch.LongTensor(masks), torch.FloatTensor(labels)
+            # inputs_id, segments, masks, labels = next(data_iter)
+            #
+            # inputs_id, segments, masks, labels = torch.LongTensor(inputs_id), torch.LongTensor(segments), \
+            #                                      torch.LongTensor(masks), torch.FloatTensor(labels)
+            #
+            # if gpu >= 0:
+            #     inputs_id, segments, masks, labels = inputs_id.cuda(
+            #         gpu), segments.cuda(gpu), masks.cuda(gpu), labels.cuda(gpu)
+            #
+            # output, loss = model(inputs_id, segments, masks, labels)
+
+            inputs_id, labels, positions, text_inputs = next(data_iter)
+
+            inputs_id, labels, positions, text_inputs = torch.LongTensor(inputs_id), torch.FloatTensor(labels), \
+                                                        torch.LongTensor(positions), text_inputs
 
             if gpu >= 0:
-                inputs_id, segments, masks, labels = inputs_id.cuda(gpu), segments.cuda(gpu), masks.cuda(
-                    gpu), labels.cuda(gpu)
+                inputs_id, labels, positions, text_inputs = inputs_id.cuda(gpu), labels.cuda(gpu), positions.cuda(
+                    gpu), text_inputs
 
-            output, loss = model(inputs_id, segments, masks, labels)
+            output, loss = model(inputs_id, labels, positions, text_inputs)
 
             output = torch.sigmoid(output)
             output = output.data.cpu().numpy()
@@ -440,7 +750,9 @@ if __name__ == "__main__":
     parser.add_argument("Y", type=str, help="size of label space")
     parser.add_argument("model", type=str, choices=["cnn_vanilla", "rnn", "conv_attn", "multi_conv_attn", "logreg", "saved",
                                                     "conv_attn_ldep", 'bert_conv_attn', 'bert_conv', 'resnet_attn',
-                                                    'conv_attn_lco','bert_pooling'], help="model")
+                                                    'conv_attn_lco','bert_pooling', 'transformer1', 'transformer2',
+                                                    'transformer3', 'transformer4', 'bert_seq_cls',
+                                                    'CNN', 'TFIDF', 'MultiCNN', 'ResCNN', 'MultiResCNN'], help="model")
     parser.add_argument("n_epochs", type=int, help="number of epochs to train")
     parser.add_argument("--embed-file", type=str, required=False, dest="embed_file",
                         help="path to a file holding pre-trained embeddings")
@@ -496,6 +808,24 @@ if __name__ == "__main__":
     parser.add_argument("--use_pos", dest="use_pos", type=str, default=None, help='NN,VBP')
     parser.add_argument('--random_seed', type=int, default=1)
 
+    # sentence encoder initialized from bert, 1-12
+    parser.add_argument('--sent_encoder_layer_start', type=int, default=1)
+    parser.add_argument('--sent_encoder_layer_end', type=int, default=1)
+    parser.add_argument("--max_sent_num", type=int, default=128)
+
+    # document encoder
+    parser.add_argument('--doc_encoder_layer', type=int, default=1)
+
+    # CNN
+    parser.add_argument("--use_tfidf", dest="use_tfidf", action="store_const", const=True, default=False)
+    parser.add_argument("--use_position", dest="use_position", action="store_const", const=True, default=False)
+    parser.add_argument("--tune_wordemb", dest="tune_wordemb", action="store_const", const=True, default=False)
+    parser.add_argument("--fasttext", type=str, required=False, dest="fasttext", default=None)
+    parser.add_argument("--glove", type=str, required=False, dest="glove", default=None)
+    parser.add_argument("--weighted_loss", dest="weighted_loss", action="store_const", const=True, default=False)
+    parser.add_argument("--mu", dest="mu", type=float, default=0.15)
+    parser.add_argument("--elmo", type=str, default=None)
+
     args = parser.parse_args()
     command = ' '.join(['python'] + sys.argv)
     args.command = command
@@ -509,6 +839,8 @@ if __name__ == "__main__":
         np.random.seed(args.random_seed)
         torch.manual_seed(args.random_seed)
         torch.cuda.manual_seed_all(args.random_seed)
+
+    print(args)
 
     main(args)
 

@@ -3,6 +3,7 @@
 """
 import gensim.models.word2vec as w2v
 import csv
+import gensim.models.fasttext as fasttext
 
 from constants import *
 
@@ -33,3 +34,17 @@ def word_embeddings(Y, notes_file, embedding_size, min_count, n_iter):
     model.save(out_file)
     return out_file
 
+def fasttext_embeddings(Y, notes_file, embedding_size, min_count, n_iter):
+    modelname = "processed_%s.fasttext" % (Y)
+    sentences = ProcessedIter(Y, notes_file)
+
+    model = fasttext.FastText(size=embedding_size, min_count=min_count, iter=n_iter)
+    print("building fasttext vocab on %s..." % (notes_file))
+
+    model.build_vocab(sentences)
+    print("training...")
+    model.train(sentences, total_examples=model.corpus_count, epochs=model.iter)
+    out_file = '/'.join(notes_file.split('/')[:-1] + [modelname])
+    print("writing embeddings to %s" % (out_file))
+    model.save(out_file)
+    return out_file

@@ -59,6 +59,26 @@ def pick_model(args, dicts):
         filter_size = int(args.filter_size)
         model = models.ConvAttnPool_lco(args, Y, args.embed_file, filter_size, args.num_filter_maps, args.lmbda, args.gpu, dicts,
                                     embed_size=args.embed_size, dropout=args.dropout, code_emb=args.code_emb)
+    elif args.model == 'transformer1':
+        model = models.Transformer1(args, Y)
+    elif args.model == 'transformer2':
+        model = models.Transformer2(args, Y)
+    elif args.model == 'transformer3':
+        model = models.Transformer3(args, Y)
+    elif args.model == 'transformer4':
+        model = models.Transformer4(args, Y)
+    elif args.model == 'bert_seq_cls':
+        model = models.Bert_seq_cls(args, Y)
+    elif args.model == 'CNN':
+        model = models.CNN(args, Y, dicts)
+    elif args.model == 'TFIDF':
+        model = models.TFIDF(args, Y)
+    elif args.model == 'MultiCNN':
+        model = models.MultiCNN(args, Y, dicts)
+    elif args.model == 'ResCNN':
+        model = models.ResCNN(args, Y, dicts)
+    elif args.model == 'MultiResCNN':
+        model = models.MultiResCNN(args, Y, dicts)
 
     if args.test_model:
         sd = torch.load(args.test_model)

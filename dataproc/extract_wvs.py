@@ -33,6 +33,28 @@ def gensim_to_embeddings(wv_file, vocab_file, Y, outfile=None):
     #smash that save button
     save_embeddings(W, words, outfile)
 
+def gensim_to_fasttext_embeddings(wv_file, vocab_file, Y, outfile=None):
+    model = gensim.models.FastText.load(wv_file)
+    wv = model.wv
+    #free up memory
+    del model
+
+    vocab = set()
+    with open(vocab_file, 'r') as vocabfile:
+        for i,line in enumerate(vocabfile):
+            line = line.strip()
+            if line != '':
+                vocab.add(line)
+    ind2w = {i+1:w for i,w in enumerate(sorted(vocab))}
+
+    W, words = build_matrix(ind2w, wv)
+
+    if outfile is None:
+        outfile = wv_file.replace('.fasttext', '.fasttext.embed')
+
+    #smash that save button
+    save_embeddings(W, words, outfile)
+
 def build_matrix(ind2w, wv):
     """
         Go through vocab in order. Find vocab word in wv.index2word, then call wv.word_vec(wv.index2word[i]).
