@@ -1022,23 +1022,6 @@ class CNN(nn.Module):
         self.embed.weight.data = W.clone()
         self.feature_size = self.embed.embedding_dim
 
-        if args.fasttext:
-            W = torch.Tensor(extract_wvs.load_embeddings(args.fasttext))
-            self.fasttext = nn.Embedding(W.size()[0], W.size()[1], padding_idx=0)
-            self.fasttext.weight.data = W.clone()
-            self.feature_size += self.embed.embedding_dim
-        else:
-            self.fasttext = None
-
-        if args.glove:
-            pretrain_word_embedding, _ = build_pretrain_embedding(args.glove, dicts['w2ind'], True)
-            W = torch.from_numpy(pretrain_word_embedding)
-            self.glove = nn.Embedding(W.size()[0], W.size()[1], padding_idx=0)
-            self.glove.weight.data = W.clone()
-            self.feature_size += self.glove.embedding_dim
-        else:
-            self.glove = None
-
         self.use_position = args.use_position
         if self.use_position:
             self.embed_position = nn.Embedding(MAX_LENGTH+1, 10, padding_idx=0)
@@ -1061,16 +1044,8 @@ class CNN(nn.Module):
         self.final = nn.Linear(args.num_filter_maps, Y)
         xavier_uniform(self.final.weight)
 
-    def forward(self, x, target, position):
+    def forward(self, x, target, position, text_inputs):
         features = [self.embed(x)]
-
-        if self.fasttext is not None:
-            f = self.fasttext(x)
-            features.append(f)
-
-        if self.glove is not None:
-            f = self.glove(x)
-            features.append(f)
 
         if self.use_position:
             f = self.embed_position(position)
@@ -1108,23 +1083,6 @@ class MultiCNN(nn.Module):
         self.embed.weight.data = W.clone()
         self.feature_size = self.embed.embedding_dim
 
-        if args.fasttext:
-            W = torch.Tensor(extract_wvs.load_embeddings(args.fasttext))
-            self.fasttext = nn.Embedding(W.size()[0], W.size()[1], padding_idx=0)
-            self.fasttext.weight.data = W.clone()
-            self.feature_size += self.embed.embedding_dim
-        else:
-            self.fasttext = None
-
-        if args.glove:
-            pretrain_word_embedding, _ = build_pretrain_embedding(args.glove, dicts['w2ind'], True)
-            W = torch.from_numpy(pretrain_word_embedding)
-            self.glove = nn.Embedding(W.size()[0], W.size()[1], padding_idx=0)
-            self.glove.weight.data = W.clone()
-            self.feature_size += self.glove.embedding_dim
-        else:
-            self.glove = None
-
         self.use_position = args.use_position
         if self.use_position:
             self.embed_position = nn.Embedding(MAX_LENGTH+1, 10, padding_idx=0)
@@ -1159,16 +1117,8 @@ class MultiCNN(nn.Module):
         self.final = nn.Linear(self.filter_num*args.num_filter_maps, Y)
         xavier_uniform(self.final.weight)
 
-    def forward(self, x, target, position):
+    def forward(self, x, target, position, text_inputs):
         features = [self.embed(x)]
-
-        if self.fasttext is not None:
-            f = self.fasttext(x)
-            features.append(f)
-
-        if self.glove is not None:
-            f = self.glove(x)
-            features.append(f)
 
         if self.use_position:
             f = self.embed_position(position)
@@ -1244,7 +1194,7 @@ class ResCNN(nn.Module):
         xavier_uniform(self.final.weight)
 
 
-    def forward(self, x, target, position):
+    def forward(self, x, target, position, text_inputs):
 
         features = [self.embed(x)]
 

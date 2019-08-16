@@ -439,8 +439,11 @@ def train_epochs(args, model, optimizer, params, dicts):
     # prepare instance before epoch since pos tagging is too slow
     train_instances = prepare_instance2(dicts, args.data_path, args)
     print("train_instances {}".format(len(train_instances)))
-    dev_instances = prepare_instance2(dicts, args.data_path.replace('train','dev'), args)
-    print("dev_instances {}".format(len(dev_instances)))
+    if args.version != 'mimic2':
+        dev_instances = prepare_instance2(dicts, args.data_path.replace('train','dev'), args)
+        print("dev_instances {}".format(len(dev_instances)))
+    else:
+        dev_instances = None
     test_instances = prepare_instance2(dicts, args.data_path.replace('train','test'), args)
     print("test_instances {}".format(len(test_instances)))
     # train_instances = dev_instances
@@ -454,7 +457,10 @@ def train_epochs(args, model, optimizer, params, dicts):
 
 
     train_loader = DataLoader(MyDataset(train_instances), args.batch_size, shuffle=True, collate_fn=my_collate2)
-    dev_loader = DataLoader(MyDataset(dev_instances), 1, shuffle=False, collate_fn=my_collate2)
+    if args.version != 'mimic2':
+        dev_loader = DataLoader(MyDataset(dev_instances), 1, shuffle=False, collate_fn=my_collate2)
+    else:
+        dev_loader = None
     test_loader = DataLoader(MyDataset(test_instances), 1, shuffle=False, collate_fn=my_collate2)
 
     if not args.test_model and args.model.find("bert") != -1:
@@ -559,6 +565,8 @@ def one_epoch(args, model, optimizer, Y, epoch, n_epochs, batch_size, data_path,
         unseen_code_inds = set()
 
     fold = 'test' if version == 'mimic2' else 'dev'
+    dev_instances = test_instances if version == 'mimic2' else dev_instances
+    dev_loader = test_loader if version == 'mimic2' else dev_loader
     if epoch == n_epochs - 1:
         print("last epoch: testing on test and train sets")
         testing = True

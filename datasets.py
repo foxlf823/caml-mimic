@@ -387,7 +387,8 @@ def load_full_codes(train_path, version='mimic3'):
             code lookup, description lookup
     """
     #get description lookup
-    desc_dict = load_code_descriptions(version=version)
+    # desc_dict = load_code_descriptions(version=version)
+    desc_dict = None
     #build code lookups from appropriate datasets
     if version == 'mimic2':
         ind2c = defaultdict(str)
