@@ -1013,9 +1013,13 @@ class TFIDF(nn.Module):
     def freeze_net(self):
         pass
 
+from elmoformanylangs import Embedder
+
 class CNN(nn.Module):
     def __init__(self, args, Y, dicts):
         super(CNN, self).__init__()
+
+        self.gpu = args.gpu
 
         W = torch.Tensor(extract_wvs.load_embeddings(args.embed_file))
         self.embed = nn.Embedding(W.size()[0], W.size()[1], padding_idx=0)
@@ -1026,6 +1030,11 @@ class CNN(nn.Module):
         if self.use_position:
             self.embed_position = nn.Embedding(MAX_LENGTH+1, 10, padding_idx=0)
             self.feature_size += 10
+
+        self.elmo = args.elmo
+        if self.elmo is not None:
+            self.elmo = Embedder(args.elmo)
+            self.feature_size += self.elmo.config['encoder']['projection_dim']*2
 
         self.embed_drop = nn.Dropout(p=args.dropout)
 
@@ -1044,12 +1053,23 @@ class CNN(nn.Module):
         self.final = nn.Linear(args.num_filter_maps, Y)
         xavier_uniform(self.final.weight)
 
+        self.loss_function = nn.BCEWithLogitsLoss()
+
     def forward(self, x, target, position, text_inputs):
         features = [self.embed(x)]
 
         if self.use_position:
             f = self.embed_position(position)
             features.append(f)
+
+        if self.elmo is not None:
+            with torch.no_grad():
+                aa = self.elmo.sents2elmo(text_inputs)
+                aa = np.array(aa)
+                elmo_rep = torch.from_numpy(aa) # batch, seq_len, elmo_hidden*2
+                if self.gpu >= 0 and torch.cuda.is_available():
+                    elmo_rep = elmo_rep.cuda(self.gpu)
+                features.append(elmo_rep)
 
         x = torch.cat(features, dim=2)
 
@@ -1066,7 +1086,7 @@ class CNN(nn.Module):
         # final layer classification
         y = self.final.weight.mul(m).sum(dim=2).add(self.final.bias)
 
-        loss = F.binary_cross_entropy_with_logits(y, target)
+        loss = self.loss_function(y, target) # F.binary_cross_entropy_with_logits(y, target)
 
         return y, loss
 
@@ -1074,9 +1094,22 @@ class CNN(nn.Module):
         for p in self.embed.parameters():
             p.requires_grad = False
 
+    def set_weighted_loss(self, label_weight, Y):
+        weight = torch.ones(Y)
+        for label_idx in range(Y):
+            if label_idx in label_weight:
+                weight[label_idx] = label_weight[label_idx]
+        if self.gpu >= 0 and torch.cuda.is_available():
+            weight = weight.cuda(self.gpu)
+        self.loss_function = nn.BCEWithLogitsLoss(pos_weight=weight)
+
+        return
+
 class MultiCNN(nn.Module):
     def __init__(self, args, Y, dicts):
         super(MultiCNN, self).__init__()
+
+        self.gpu = args.gpu
 
         W = torch.Tensor(extract_wvs.load_embeddings(args.embed_file))
         self.embed = nn.Embedding(W.size()[0], W.size()[1], padding_idx=0)
@@ -1087,6 +1120,11 @@ class MultiCNN(nn.Module):
         if self.use_position:
             self.embed_position = nn.Embedding(MAX_LENGTH+1, 10, padding_idx=0)
             self.feature_size += 10
+
+        self.elmo = args.elmo
+        if self.elmo is not None:
+            self.elmo = Embedder(args.elmo)
+            self.feature_size += self.elmo.config['encoder']['projection_dim']*2
 
         self.embed_drop = nn.Dropout(p=args.dropout)
 
@@ -1117,12 +1155,23 @@ class MultiCNN(nn.Module):
         self.final = nn.Linear(self.filter_num*args.num_filter_maps, Y)
         xavier_uniform(self.final.weight)
 
+        self.loss_function = nn.BCEWithLogitsLoss()
+
     def forward(self, x, target, position, text_inputs):
         features = [self.embed(x)]
 
         if self.use_position:
             f = self.embed_position(position)
             features.append(f)
+
+        if self.elmo is not None:
+            with torch.no_grad():
+                aa = self.elmo.sents2elmo(text_inputs)
+                aa = np.array(aa)
+                elmo_rep = torch.from_numpy(aa) # batch, seq_len, elmo_hidden*2
+                if self.gpu >= 0 and torch.cuda.is_available():
+                    elmo_rep = elmo_rep.cuda(self.gpu)
+                features.append(elmo_rep)
 
         x = torch.cat(features, dim=2)
 
@@ -1146,7 +1195,7 @@ class MultiCNN(nn.Module):
         # final layer classification
         y = self.final.weight.mul(m).sum(dim=2).add(self.final.bias)
 
-        loss = F.binary_cross_entropy_with_logits(y, target)
+        loss = self.loss_function(y, target) # F.binary_cross_entropy_with_logits(y, target)
 
         return y, loss
 
@@ -1154,11 +1203,24 @@ class MultiCNN(nn.Module):
         for p in self.embed.parameters():
             p.requires_grad = False
 
+    def set_weighted_loss(self, label_weight, Y):
+        weight = torch.ones(Y)
+        for label_idx in range(Y):
+            if label_idx in label_weight:
+                weight[label_idx] = label_weight[label_idx]
+        if self.gpu >= 0 and torch.cuda.is_available():
+            weight = weight.cuda(self.gpu)
+        self.loss_function = nn.BCEWithLogitsLoss(pos_weight=weight)
+
+        return
+
 
 class ResCNN(nn.Module):
 
     def __init__(self, args, Y, dicts):
         super(ResCNN, self).__init__()
+
+        self.gpu = args.gpu
 
         W = torch.Tensor(extract_wvs.load_embeddings(args.embed_file))
         self.embed = nn.Embedding(W.size()[0], W.size()[1], padding_idx=0)
@@ -1169,6 +1231,11 @@ class ResCNN(nn.Module):
         if self.use_position:
             self.embed_position = nn.Embedding(MAX_LENGTH+1, 10, padding_idx=0)
             self.feature_size += 10
+
+        self.elmo = args.elmo
+        if self.elmo is not None:
+            self.elmo = Embedder(args.elmo)
+            self.feature_size += self.elmo.config['encoder']['projection_dim']*2
 
         self.embed_drop = nn.Dropout(p=args.dropout)
 
@@ -1193,6 +1260,8 @@ class ResCNN(nn.Module):
         self.final = nn.Linear(args.num_filter_maps, Y)
         xavier_uniform(self.final.weight)
 
+        self.loss_function = nn.BCEWithLogitsLoss()
+
 
     def forward(self, x, target, position, text_inputs):
 
@@ -1201,6 +1270,15 @@ class ResCNN(nn.Module):
         if self.use_position:
             f = self.embed_position(position)
             features.append(f)
+
+        if self.elmo is not None:
+            with torch.no_grad():
+                aa = self.elmo.sents2elmo(text_inputs)
+                aa = np.array(aa)
+                elmo_rep = torch.from_numpy(aa) # batch, seq_len, elmo_hidden*2
+                if self.gpu >= 0 and torch.cuda.is_available():
+                    elmo_rep = elmo_rep.cuda(self.gpu)
+                features.append(elmo_rep)
 
         x = torch.cat(features, dim=2)
 
@@ -1217,7 +1295,7 @@ class ResCNN(nn.Module):
         # final layer classification
         y = self.final.weight.mul(m).sum(dim=2).add(self.final.bias)
 
-        loss = F.binary_cross_entropy_with_logits(y, target)
+        loss = self.loss_function(y, target) # F.binary_cross_entropy_with_logits(y, target)
 
         return y, loss
 
@@ -1225,7 +1303,18 @@ class ResCNN(nn.Module):
         for p in self.embed.parameters():
             p.requires_grad = False
 
-from elmoformanylangs import Embedder
+    def set_weighted_loss(self, label_weight, Y):
+        weight = torch.ones(Y)
+        for label_idx in range(Y):
+            if label_idx in label_weight:
+                weight[label_idx] = label_weight[label_idx]
+        if self.gpu >= 0 and torch.cuda.is_available():
+            weight = weight.cuda(self.gpu)
+        self.loss_function = nn.BCEWithLogitsLoss(pos_weight=weight)
+
+        return
+
+
 
 class MultiResCNN(nn.Module):
 
@@ -1340,7 +1429,8 @@ class MultiResCNN(nn.Module):
         for label_idx in range(Y):
             if label_idx in label_weight:
                 weight[label_idx] = label_weight[label_idx]
-
+        if self.gpu >= 0 and torch.cuda.is_available():
+            weight = weight.cuda(self.gpu)
         self.loss_function = nn.BCEWithLogitsLoss(pos_weight=weight)
 
         return
