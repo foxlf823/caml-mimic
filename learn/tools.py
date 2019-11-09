@@ -16,7 +16,7 @@ import datasets
 import persistence
 import numpy as np
 
-def pick_model(args, dicts):
+def pick_model(args, dicts, label_weight=None):
     """
         Use args to initialize the appropriate model
     """
@@ -79,6 +79,8 @@ def pick_model(args, dicts):
         model = models.ResCNN(args, Y, dicts)
     elif args.model == 'MultiResCNN':
         model = models.MultiResCNN(args, Y, dicts)
+    else:
+        raise RuntimeError("wrong model name")
 
     if args.test_model:
         sd = torch.load(args.test_model)
@@ -86,6 +88,26 @@ def pick_model(args, dicts):
     if args.gpu >= 0:
         model.cuda(args.gpu)
     return model
+
+def pick_model1(args, dicts, all_data):
+    Y = len(dicts['ind2c'])
+
+    if args.mode == 'sp-mtl' and args.model == 'MultiResCNN':
+        output_layers = []
+        feature_extractor = models.MultiResCNN_Feature(args, Y, dicts)
+        if args.gpu >= 0:
+            feature_extractor = feature_extractor.cuda(args.gpu)
+        for data in all_data:
+            ol = models.Output_Layer(args, Y, dicts)
+            if args.gpu >= 0:
+                ol = ol.cuda(args.gpu)
+            output_layers.append(ol)
+
+    else:
+        raise RuntimeError("wrong model or mode name")
+
+    return feature_extractor, output_layers
+
 
 def make_param_dict(args):
     """

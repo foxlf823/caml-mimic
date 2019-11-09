@@ -454,7 +454,8 @@ def train_epochs(args, model, optimizer, params, dicts):
         label_weight = compute_class_weight(label_dist, mu=args.mu)
         print(label_weight)
         model.set_weighted_loss(label_weight, len(dicts['ind2c']))
-
+        # model = tools.pick_model(args, dicts, label_weight)
+        # print(model)
 
     train_loader = DataLoader(MyDataset(train_instances), args.batch_size, shuffle=True, collate_fn=my_collate2)
     if args.version != 'mimic2':
@@ -573,8 +574,11 @@ def one_epoch(args, model, optimizer, Y, epoch, n_epochs, batch_size, data_path,
         quiet = False
 
     #test on dev
+    evaluation_start = time.time()
     metrics = test(args, model, Y, epoch, data_path, fold, gpu, version, unseen_code_inds, dicts, samples, model_dir,
                    testing, dev_instances, dev_loader)
+    evaluation_finish = time.time()
+    print("evaluation finish in %.2fs" % (evaluation_finish - evaluation_start))
     if testing or epoch == n_epochs - 1:
         print("\nevaluating on test")
         metrics_te = test(args, model, Y, epoch, data_path, "test", gpu, version, unseen_code_inds, dicts, samples,

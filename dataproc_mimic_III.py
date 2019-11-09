@@ -42,8 +42,10 @@ print("unique ICD9 code: {}".format(len(df['ICD9_CODE'].unique())))
 # step 2: process notes
 #This reads all notes, selects only the discharge summaries, and tokenizes them, returning the output filename
 min_sentence_len = 3
-disch_full_file = get_discharge_summaries.my_write_discharge_summaries("%s/disch_full.csv" % MIMIC_3_DIR, min_sentence_len)
-
+# disch_full_file = get_discharge_summaries.my_write_discharge_summaries("%s/disch_full.csv" % MIMIC_3_DIR, min_sentence_len)
+get_discharge_summaries.prepare_wordemb_corpus("%s/disch_mimic3.txt" % MIMIC_3_DIR)
+print("finish preparing word emb file")
+exit(0)
 
 df = pd.read_csv('%s/disch_full.csv' % MIMIC_3_DIR)
 
